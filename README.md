@@ -1,5 +1,7 @@
 # Cube-Reinforcer
 
+----
+
 `Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a NumPy-only REINFORCE pipeline.
 
 The repository combines:

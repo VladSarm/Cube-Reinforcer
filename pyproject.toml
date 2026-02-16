@@ -1,0 +1,13 @@
+[project]
+name = "cube-reinforcer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pygame>=2.6.1",
+    "pytest>=9.0.2",
+    "tqdm>=4.67.3",
+]

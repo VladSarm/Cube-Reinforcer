@@ -265,9 +265,9 @@ Gradient estimator:
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
-  ```math
+```math
   h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
-  ```
+ ```
 - activation:
   ```math
   h = \text{ELU}(h_{\text{pre}})

@@ -18,7 +18,7 @@ from .torch_env import TorchRubikBatchEnv
 
 class ReinforceTrainer:
     CURRICULUM_THRESHOLD = 0.80
-    CURRICULUM_MAX_SCRAMBLE = 10
+    CURRICULUM_MAX_SCRAMBLE = 15
 
     def __init__(self, args: argparse.Namespace):
         self.args = args

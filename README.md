@@ -106,11 +106,14 @@ uv run python -m rubik_rl.trainer --help
 ---
 
 ## Running Tests
-Run full test suite:
+Run full test suite from the project root:
 ```bash
 cd Cube-Reinforcer
+uv sync
 uv run pytest -q
 ```
+
+If pytest fails with `ModuleNotFoundError: No module named 'yaml'` (e.g. when a system pytest plugin like ROS is loaded), the project now depends on `pyyaml`; run `uv sync` and try again. To avoid loading external plugins, run tests with an isolated env: `uv run pytest -q -p no:launch_testing` or ensure no `PYTHONPATH` points at ROS/system site-packages.
 
 The tests cover:
 - engine move correctness and inverse properties,
@@ -206,11 +209,15 @@ Common options:
 
 Mode options:
 - `--scramble-steps` (default `20`)
+- `--show-index N` (GUI only): draw the sticker at flat state index `N` (0..23) in black, to visually identify that cell.
 
 Examples:
 ```bash
-# GUI + HTTP server
+# GUI + HTTP server (from project root)
 uv run python -m rubik_sim.cli gui --host 127.0.0.1 --port 8000 --scramble-steps 8
+
+# GUI with one sticker highlighted in black (e.g. index 0)
+uv run python -m rubik_sim.cli gui --show-index 0
 
 # Headless server
 uv run python -m rubik_sim.cli headless --host 127.0.0.1 --port 8001 --scramble-steps 8
@@ -345,7 +352,15 @@ Important training details:
   $$
   therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
 
-Examples:
+### Sparse training (7-bit state, 6 actions, plane reward)
+Separate script: reduced state (cells a..g), 6 actions (angle H fixed), vectorized reward by planes.
+```bash
+cd Cube-Reinforcer
+uv run python -m rubik_rl.trainer_sparse --episodes 2000 --scramble-steps 4 --max-episode-steps 200 --lr 0.01 --save-every 500 --checkpoint-dir checkpoints_sparse
+```
+Checkpoints go to `checkpoints_sparse/`. In the GUI, use the **Eval Sparse** button (below Scramble) to run the sparse policy; it loads from `checkpoints_sparse/`.
+
+Examples (full trainer):
 ```bash
 # Fast local parallel training (internal process pool envs)
 uv run python -m rubik_rl.trainer \

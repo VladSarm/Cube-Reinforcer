@@ -3,24 +3,36 @@
 from __future__ import annotations
 
 import math
+import sys
 import threading
+import traceback
 
 import numpy as np
 import pygame
 
-from rubik_rl.checkpoint import CheckpointManager
+from rubik_rl.checkpoint import CheckpointManager, load_sparse_latest
 from .actions import (
+    ACTION_6_TO_12,
     ACTION_NAMES,
     ACTION_TABLE,
     CLOCKWISE_ANGLE_DEG,
     FACE_AXIS_LAYER,
     FACE_INDEX,
     FACE_SPECS,
+    MOVE_PERMUTATIONS,
+    STICKER_LABELS,
     STICKER_MODEL,
+    SLOT_INDEX_TO_CELL_NAME,
 )
 from .engine import RubikEngine
 from .server import RubikHTTPServer
 from .state_codec import encode_one_hot
+
+# Sparse policy (6 actions): used when "Eval Sparse" is on
+def _sparse_state_from_engine(engine, history_snapshot) -> np.ndarray:
+    from rubik_rl.sparse_state import piece_permutation, sparse_state_from_perm
+    perm = piece_permutation(history_snapshot)
+    return sparse_state_from_perm(perm)
 
 COLOR_MAP = {
     0: (245, 245, 245),
@@ -30,6 +42,7 @@ COLOR_MAP = {
     4: (255, 140, 20),
     5: (30, 90, 220),
 }
+SHOW_INDEX_BLACK = (25, 25, 25)  # color for --show-index highlighted sticker
 
 BG = (18, 22, 30)
 LINE = (28, 32, 42)
@@ -37,6 +50,7 @@ TEXT = (220, 225, 235)
 BUTTON = (52, 60, 78)
 BUTTON_BORDER = (92, 110, 140)
 
+# By key code (works with US layout)
 KEY_TO_ACTION = {
     pygame.K_u: 0,
     pygame.K_j: 1,
@@ -52,7 +66,36 @@ KEY_TO_ACTION = {
     pygame.K_n: 11,
 }
 
+# By scancode (physical key; works with any layout: Russian, etc.)
+# SDL / USB HID usage page 0x07: A=4, B=5, ..., U=24, ...
+SCANCODE_TO_ACTION = {
+    24: 0,   # U -> U+/U-
+    13: 1,   # J
+    7: 2,    # D
+    6: 3,    # C
+    15: 4,   # L
+    14: 5,   # K
+    21: 6,   # R
+    8: 7,    # E
+    9: 8,    # F
+    10: 9,   # G
+    5: 10,   # B
+    17: 11,  # N
+}
+
 AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
+
+# Unfolded cube net: 6x6 matrix; 0 = no cell, 1 = filled cell, string = sticker label (index name)
+NET_MATRIX = [
+    [1, "F", "E1", "F1", 0, 0],
+    ["G", "E", "A1", "B1", 0, 0],
+    ["E2", "A2", "A", "B", "B2", "F2"],
+    ["G2", "C2", "C", "D", "D2", 1],
+    [0, 0, "C1", "D1", 0, 0],
+    [0, 0, "G1", 1, 0, 0],
+]
+LABEL_TO_INDEX = {label: i for i, label in enumerate(STICKER_LABELS)}
+NET_FILLED_COLOR = (40, 40, 50)  # color for cells with value 1
 
 
 def _rotation_matrix_float(axis: str, angle_rad: float) -> np.ndarray:
@@ -72,9 +115,11 @@ class RubikGUI:
         host: str = "127.0.0.1",
         port: int = 8000,
         scramble_steps: int = 20,
+        show_index: int | None = None,
     ):
         self.engine = engine
         self.scramble_steps = scramble_steps
+        self.show_index = show_index  # if set, sticker at this flat index (0..23) is drawn black
         self._anim_cond = threading.Condition()
         self._pending_anim_request: dict | None = None
         self._active_anim_request: dict | None = None
@@ -88,17 +133,19 @@ class RubikGUI:
         )
 
         pygame.init()
-        self.size = (960, 640)
+        self.size = (1280, 800)
         self.screen = pygame.display.set_mode(self.size)
         pygame.display.set_caption("Rubik 2x2 Simulator")
         self.clock = pygame.time.Clock()
 
         self.font = pygame.font.SysFont("monospace", 18)
         self.small_font = pygame.font.SysFont("monospace", 14)
+        self.sticker_font = pygame.font.SysFont("monospace", 11)
 
         self.scramble_btn = pygame.Rect(40, 560, 180, 44)
         self.reset_btn = pygame.Rect(240, 560, 180, 44)
         self.eval_btn = pygame.Rect(440, 560, 200, 44)
+        self.eval_sparse_btn = pygame.Rect(40, 610, 200, 44)
         self.eval_anti_repeat_checkbox = pygame.Rect(664, 570, 24, 24)
 
         self.yaw = -0.75
@@ -119,8 +166,13 @@ class RubikGUI:
         self.eval_enabled = False
         self.eval_policy = None
         self.eval_checkpoint_dir = "checkpoints"
+        self.eval_sparse_enabled = False
+        self.eval_sparse_policy = None
+        self.eval_sparse_checkpoint_dir = "checkpoints_sparse"
         self.eval_anti_repeat_enabled = False
         self.eval_action_history: list[int] = []
+        self.eval_runs_solved = 0
+        self.eval_runs_total = 0
 
     def _apply_camera(self, point: np.ndarray) -> np.ndarray:
         rot_y = _rotation_matrix_float("y", self.yaw)
@@ -166,30 +218,40 @@ class RubikGUI:
 
     def _start_action_animation(self, action: int, duration_ms: int | None = None):
         if self.animating:
+            print("[GUI] _start_action_animation: ignored (already animating)", file=sys.stderr)
             return
         self.anim_duration_ms = int(duration_ms) if duration_ms is not None else self._default_anim_duration_ms
         self.animating = True
         self.anim_action = int(action)
         self.anim_start_ms = pygame.time.get_ticks()
         self.anim_base_state = self.engine.get_state()
+        print(f"[GUI] _start_action_animation: started action={action} ({ACTION_NAMES[action]})", file=sys.stderr)
 
     def _update_animation(self):
         if not self.animating:
             return
         elapsed = pygame.time.get_ticks() - self.anim_start_ms
         if elapsed >= self.anim_duration_ms:
-            state = self.engine.step(self.anim_action)
-            self.animating = False
-            self.anim_action = -1
-            self.anim_base_state = None
-            self.anim_duration_ms = self._default_anim_duration_ms
-
-            with self._anim_cond:
-                if self._active_anim_request is not None:
-                    self._active_anim_request["state"] = state.copy()
-                    self._active_anim_request["done"] = True
-                    self._anim_cond.notify_all()
-                    self._active_anim_request = None
+            state = None
+            action_done = self.anim_action
+            try:
+                state = self.engine.step(self.anim_action)
+                print(f"[GUI] _update_animation: step done action={action_done} history_len={len(self.engine.history)}", file=sys.stderr)
+            except Exception as e:
+                traceback.print_exc(file=sys.stderr)
+                print(f"[GUI] _update_animation: engine.step() failed: {e}", file=sys.stderr)
+            finally:
+                self.animating = False
+                self.anim_action = -1
+                self.anim_base_state = None
+                self.anim_duration_ms = self._default_anim_duration_ms
+            if state is not None:
+                with self._anim_cond:
+                    if self._active_anim_request is not None:
+                        self._active_anim_request["state"] = state.copy()
+                        self._active_anim_request["done"] = True
+                        self._anim_cond.notify_all()
+                        self._active_anim_request = None
 
     def _process_pending_animation_request(self):
         if self.animating:
@@ -245,11 +307,24 @@ class RubikGUI:
         normal = rot @ np.array(meta["normal"], dtype=np.float64)
         return rot, normal
 
+    def _piece_permutation(self) -> np.ndarray:
+        """Cumulative permutation: perm[i] = solved-state index of the piece now at slot i."""
+        perm = np.arange(24, dtype=np.int32)
+        # Snapshot to avoid "list changed size during iteration" if server thread appends to history
+        history_snapshot = list(self.engine.history)
+        for action in history_snapshot:
+            if 0 <= action < len(MOVE_PERMUTATIONS):
+                perm = perm[MOVE_PERMUTATIONS[action]]
+        return perm
+
     def _draw_cube(self):
         if self.animating and self.anim_base_state is not None:
             state = self.anim_base_state.reshape(6, 4)
         else:
             state = self.engine.get_state().reshape(6, 4)
+
+        # Labels follow the cell: label at slot i = label of the piece currently at slot i
+        piece_at = self._piece_permutation()
 
         draw_items = []
         for meta in STICKER_MODEL:
@@ -272,20 +347,74 @@ class RubikGUI:
             if any(pt is None for pt in poly_screen):
                 continue
 
+            if self.show_index is not None and meta["idx"] == self.show_index:
+                color = SHOW_INDEX_BLACK
+            else:
+                color = COLOR_MAP[color_id]
             depth = float(sum(p[2] for p in poly_view) / 4.0)
-            draw_items.append((depth, poly_screen, COLOR_MAP[color_id]))
+            # Piece at this slot came from solved index piece_at[meta["idx"]]
+            idx = int(piece_at[meta["idx"]])
+            label = STICKER_LABELS[max(0, min(idx, 23))]
+            draw_items.append((depth, poly_screen, color, label))
 
-        draw_items.sort(key=lambda x: x[0])
-        for _, poly, color in draw_items:
+            draw_items.sort(key=lambda x: x[0])
+        for _, poly, color, label in draw_items:
             pygame.draw.polygon(self.screen, color, poly)
             pygame.draw.polygon(self.screen, LINE, poly, 2)
+            # Draw slot label at polygon center (labels follow their cell on moves)
+            cx = sum(p[0] for p in poly) / 4
+            cy = sum(p[1] for p in poly) / 4
+            text_color = (255, 255, 255) if color == SHOW_INDEX_BLACK else (28, 28, 36)
+            surf = self.sticker_font.render(label, True, text_color)
+            self.screen.blit(surf, (cx - surf.get_width() // 2, cy - surf.get_height() // 2))
+
+    def _draw_net(self):
+        """Draw the unfolded cube net: cell names (a..g, H), neutral background; green only if correct piece at that cell."""
+        piece_at = self._piece_permutation()  # piece_at[slot] = solved-index of piece now at that slot
+
+        cell_size = 40
+        origin_x = 720
+        origin_y = 140
+        net_correct_green = (30, 160, 30)  # green when piece_at[idx] == idx (correct piece at correct cell)
+
+        for r in range(6):
+            for c in range(6):
+                val = NET_MATRIX[r][c]
+                if val == 0:
+                    continue
+                rect = pygame.Rect(origin_x + c * cell_size, origin_y + r * cell_size, cell_size, cell_size)
+                if val == 1:
+                    # Fixed corner H (marked 1 on net): always neutral, label "H"
+                    pygame.draw.rect(self.screen, NET_FILLED_COLOR, rect)
+                    label = "H"
+                    txt = self.sticker_font.render(label, True, TEXT)
+                    self.screen.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
+                else:
+                    idx = LABEL_TO_INDEX.get(val)
+                    if idx is not None:
+                        cell_name = SLOT_INDEX_TO_CELL_NAME[idx]
+                        # Green only if the piece that belongs at this cell is at this cell
+                        is_correct = int(piece_at[idx]) == idx
+                        bg = net_correct_green if is_correct else NET_FILLED_COLOR
+                        pygame.draw.rect(self.screen, bg, rect)
+                        txt = self.sticker_font.render(
+                            cell_name, True, (28, 28, 36) if is_correct else TEXT
+                        )
+                        self.screen.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
+                    else:
+                        pygame.draw.rect(self.screen, NET_FILLED_COLOR, rect)
+                        txt = self.sticker_font.render(str(val), True, TEXT)
+                        self.screen.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
+                pygame.draw.rect(self.screen, LINE, rect, 1)
 
     def _draw_buttons(self):
         eval_label = "Eval: ON" if self.eval_enabled else "Eval: OFF"
+        eval_sparse_label = "Eval Sparse: ON" if self.eval_sparse_enabled else "Eval Sparse: OFF"
         for rect, label in (
             (self.scramble_btn, "Scramble"),
             (self.reset_btn, "Reset"),
             (self.eval_btn, eval_label),
+            (self.eval_sparse_btn, eval_sparse_label),
         ):
             pygame.draw.rect(self.screen, BUTTON, rect, border_radius=8)
             pygame.draw.rect(self.screen, BUTTON_BORDER, rect, width=2, border_radius=8)
@@ -333,9 +462,10 @@ class RubikGUI:
         if self.eval_enabled:
             self.eval_enabled = False
             self.eval_action_history = []
+            self.eval_runs_total += 1
             print("eval_mode disabled")
             return
-
+        self.eval_sparse_enabled = False
         policy, episode = self._load_eval_policy()
         if policy is None:
             print(f"eval_mode cannot enable: no checkpoints found in '{self.eval_checkpoint_dir}'")
@@ -344,6 +474,23 @@ class RubikGUI:
         self.eval_enabled = True
         self.eval_action_history = []
         print(f"eval_mode enabled (checkpoint episode={episode})")
+
+    def _toggle_eval_sparse(self):
+        if self.eval_sparse_enabled:
+            self.eval_sparse_enabled = False
+            self.eval_action_history = []
+            self.eval_runs_total += 1
+            print("eval_sparse disabled")
+            return
+        self.eval_enabled = False
+        policy, episode = load_sparse_latest(self.eval_sparse_checkpoint_dir)
+        if policy is None:
+            print(f"eval_sparse cannot enable: no checkpoints in '{self.eval_sparse_checkpoint_dir}'")
+            return
+        self.eval_sparse_policy = policy
+        self.eval_sparse_enabled = True
+        self.eval_action_history = []
+        print(f"eval_sparse enabled (checkpoint episode={episode})")
 
     @staticmethod
     def _second_best_action(probs: np.ndarray, best_action: int) -> int:
@@ -355,20 +502,48 @@ class RubikGUI:
         return int(best_action)
 
     def _eval_tick(self):
-        if not self.eval_enabled:
+        eval_active = self.eval_enabled or self.eval_sparse_enabled
+        if not eval_active:
             return
         if self.animating:
             return
         if self.engine.is_solved():
+            steps = len(self.eval_action_history)
+            self.eval_runs_solved += 1
+            self.eval_runs_total += 1
+            rate = self.eval_runs_solved / self.eval_runs_total
+            mode = "eval_sparse" if self.eval_sparse_enabled else "eval"
+            print(f"{mode} finished: solved in {steps} steps | session success_rate={self.eval_runs_solved}/{self.eval_runs_total} ({rate:.1%})")
             self.eval_enabled = False
+            self.eval_sparse_enabled = False
             self.eval_action_history = []
-            print("eval_mode finished: cube solved")
             return
+
+        if self.eval_sparse_enabled:
+            if self.eval_sparse_policy is None:
+                self.eval_sparse_enabled = False
+                self.eval_action_history = []
+                return
+            history_snapshot = list(self.engine.history)
+            state_sparse = _sparse_state_from_engine(self.engine, history_snapshot)
+            hist_oh = self.eval_sparse_policy.history_one_hot(self.eval_action_history)
+            action_6, probs = self.eval_sparse_policy.sample_action(state_sparse, hist_oh)
+            if self.eval_anti_repeat_enabled:
+                recent = self.eval_action_history[-4:]
+                if len(recent) == 4 and all(a == action_6 for a in recent):
+                    alt = self._second_best_action(probs, action_6)
+                    if alt != action_6:
+                        action_6 = alt
+            self._start_action_animation(ACTION_6_TO_12[action_6], duration_ms=self._default_anim_duration_ms)
+            self.eval_action_history.append(int(action_6))
+            if len(self.eval_action_history) > 8:
+                self.eval_action_history = self.eval_action_history[-8:]
+            return
+
         if self.eval_policy is None:
             self.eval_enabled = False
             self.eval_action_history = []
             return
-
         state_one_hot = encode_one_hot(self.engine.get_state()).astype(np.float64)
         action, probs = self.eval_policy.sample_action(state_one_hot)
         if self.eval_anti_repeat_enabled:
@@ -387,53 +562,71 @@ class RubikGUI:
         running = True
 
         while running:
-            self.clock.tick(60)
-            self._process_pending_animation_request()
-            self._update_animation()
-            self._eval_tick()
+            try:
+                self.clock.tick(60)
+                self._process_pending_animation_request()
+                self._update_animation()
+                self._eval_tick()
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+                print("[GUI] main loop tick failed", file=sys.stderr)
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-
-                elif event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                try:
+                    if event.type == pygame.QUIT:
                         running = False
-                    elif event.key in KEY_TO_ACTION:
-                        self._start_action_animation(KEY_TO_ACTION[event.key])
 
-                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.scramble_btn.collidepoint(event.pos):
-                        if not self.animating:
-                            self.engine.scramble(self.scramble_steps)
-                            self.eval_action_history = []
-                    elif self.reset_btn.collidepoint(event.pos):
-                        if not self.animating:
-                            self.engine.reset()
-                            self.eval_action_history = []
-                    elif self.eval_btn.collidepoint(event.pos):
-                        self._toggle_eval()
-                    elif self.eval_anti_repeat_checkbox.collidepoint(event.pos):
-                        self.eval_anti_repeat_enabled = not self.eval_anti_repeat_enabled
-                        print(f"eval_anti_repeat_x5={'on' if self.eval_anti_repeat_enabled else 'off'}")
-                    else:
-                        self.dragging = True
+                    elif event.type == pygame.KEYDOWN:
+                        action = KEY_TO_ACTION.get(event.key)
+                        if action is None and getattr(event, "scancode", None) is not None:
+                            action = SCANCODE_TO_ACTION.get(event.scancode)
+                        if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                            running = False
+                        elif action is not None:
+                            self._start_action_animation(action)
+
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if self.scramble_btn.collidepoint(event.pos):
+                            if not self.animating:
+                                self.engine.scramble(self.scramble_steps)
+                                self.eval_action_history = []
+                        elif self.reset_btn.collidepoint(event.pos):
+                            if not self.animating:
+                                self.engine.reset()
+                                self.eval_action_history = []
+                        elif self.eval_btn.collidepoint(event.pos):
+                            self._toggle_eval()
+                        elif self.eval_sparse_btn.collidepoint(event.pos):
+                            self._toggle_eval_sparse()
+                        elif self.eval_anti_repeat_checkbox.collidepoint(event.pos):
+                            self.eval_anti_repeat_enabled = not self.eval_anti_repeat_enabled
+                            print(f"eval_anti_repeat_x5={'on' if self.eval_anti_repeat_enabled else 'off'}")
+                        else:
+                            self.dragging = True
+                            self.last_mouse = event.pos
+
+                    elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                        self.dragging = False
+
+                    elif event.type == pygame.MOUSEMOTION and self.dragging:
+                        dx = event.pos[0] - self.last_mouse[0]
+                        dy = event.pos[1] - self.last_mouse[1]
                         self.last_mouse = event.pos
-
-                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    self.dragging = False
-
-                elif event.type == pygame.MOUSEMOTION and self.dragging:
-                    dx = event.pos[0] - self.last_mouse[0]
-                    dy = event.pos[1] - self.last_mouse[1]
-                    self.last_mouse = event.pos
-                    self.yaw += dx * 0.01
-                    self.pitch += dy * 0.01
-                    self.pitch = max(-1.2, min(1.2, self.pitch))
+                        self.yaw += dx * 0.01
+                        self.pitch += dy * 0.01
+                        self.pitch = max(-1.2, min(1.2, self.pitch))
+                except Exception:
+                    traceback.print_exc(file=sys.stderr)
+                    print("[GUI] event handler failed", file=sys.stderr)
 
             self.screen.fill(BG)
             self._draw_hud()
-            self._draw_cube()
+            try:
+                self._draw_cube()
+                self._draw_net()
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+                print("[GUI] _draw_cube/_draw_net failed", file=sys.stderr)
             self._draw_buttons()
             pygame.display.flip()
 

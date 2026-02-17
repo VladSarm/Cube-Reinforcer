@@ -9,6 +9,40 @@ from pathlib import Path
 import numpy as np
 
 from .policy import LinearSoftmaxPolicy
+from .policy_sparse import SparseLinearSoftmaxPolicy
+
+
+def load_sparse_latest(checkpoint_dir: str = "checkpoints_sparse") -> tuple[SparseLinearSoftmaxPolicy | None, int]:
+    """Load latest sparse policy (6 actions, 31-dim input) from directory. Returns (policy, episode)."""
+    dir_path = Path(checkpoint_dir)
+    if not dir_path.is_dir():
+        return None, 0
+    best_ep = -1
+    best_path: Path | None = None
+    for p in dir_path.glob("policy_ep*.npz"):
+        m = CheckpointManager.FILE_PATTERN.search(p.name)
+        if not m:
+            continue
+        ep = int(m.group(1))
+        if ep > best_ep:
+            best_ep = ep
+            best_path = p
+    if best_path is None:
+        return None, 0
+    data = np.load(best_path, allow_pickle=True)
+    episode = int(np.asarray(data["episode"]).reshape(-1)[0])
+    policy = SparseLinearSoftmaxPolicy(
+        W1=np.asarray(data["W1"], dtype=np.float64),
+        b1=np.asarray(data["b1"], dtype=np.float64),
+        W2=np.asarray(data["W2"], dtype=np.float64),
+        b2=np.asarray(data["b2"], dtype=np.float64),
+    )
+    if "rng_state_json" in data:
+        try:
+            policy.rng.bit_generator.state = json.loads(str(np.asarray(data["rng_state_json"]).reshape(-1)[0]))
+        except Exception:
+            pass
+    return policy, episode
 
 
 class CheckpointManager:
@@ -22,6 +56,21 @@ class CheckpointManager:
         return self.dir / f"policy_ep{episode:07d}.npz"
 
     def save(self, policy: LinearSoftmaxPolicy, episode: int, metadata: dict | None = None) -> Path:
+        path = self._path_for_episode(episode)
+        metadata = metadata or {}
+        np.savez(
+            path,
+            W1=policy.W1,
+            b1=policy.b1,
+            W2=policy.W2,
+            b2=policy.b2,
+            episode=np.array([episode], dtype=np.int64),
+            metadata_json=np.array([json.dumps(metadata)], dtype=object),
+            rng_state_json=np.array([json.dumps(policy.rng.bit_generator.state)], dtype=object),
+        )
+        return path
+
+    def save_sparse(self, policy: SparseLinearSoftmaxPolicy, episode: int, metadata: dict | None = None) -> Path:
         path = self._path_for_episode(episode)
         metadata = metadata or {}
         np.savez(

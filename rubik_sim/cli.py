@@ -36,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     gui = sub.add_parser("gui", parents=[common], help="Run pygame GUI with HTTP server")
     gui.add_argument("--scramble-steps", type=int, default=20)
+    gui.add_argument(
+        "--show-index",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Show sticker at flat state index N (0..23) as black in the initial solved view",
+    )
 
     return parser
 
@@ -61,9 +68,20 @@ def main():
         return
 
     if args.mode == "gui":
+        from .actions import STATE_SIZE
         from .gui import RubikGUI
 
-        app = RubikGUI(engine=engine, host=args.host, port=args.port, scramble_steps=args.scramble_steps)
+        show_index = getattr(args, "show_index", None)
+        if show_index is not None and (show_index < 0 or show_index >= STATE_SIZE):
+            parser.error(f"--show-index must be in range 0..{STATE_SIZE - 1}, got {show_index}")
+
+        app = RubikGUI(
+            engine=engine,
+            host=args.host,
+            port=args.port,
+            scramble_steps=args.scramble_steps,
+            show_index=show_index,
+        )
         app.run()
         return
 

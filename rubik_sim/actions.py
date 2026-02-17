@@ -12,6 +12,13 @@ N_FACES = 6
 STICKERS_PER_FACE = 4
 STATE_SIZE = N_FACES * STICKERS_PER_FACE
 
+# Labels for each of the 24 state slots (index 0..23); shown on stickers and follow the cell on moves.
+STICKER_LABELS = (
+    "A", "B", "C", "D", "D2", "B2", "H2", "F2",
+    "C1", "D1", "G1", "H1", "G", "H", "E", "F",
+    "A2", "C2", "E2", "G2", "B1", "A1", "E1", "F1",
+)
+
 # Face specification from outside view.
 FACE_SPECS = {
     "U": {"normal": (0, 1, 0), "right": (1, 0, 0), "up": (0, 0, -1)},
@@ -40,6 +47,14 @@ ACTION_TABLE = [
 ]
 
 ACTION_NAMES = [f"{face}{'+' if direction > 0 else '-'}" for face, direction in ACTION_TABLE]
+
+# Fixed corner for sparse state: H (static, marked 1 on net). Slot index of H in solved state.
+FIXED_CORNER_SLOT_H = 13  # STICKER_LABELS[13] == "H"
+# Reduced action space (angle H fixed): only faces U, L, B (keys u/j, k/l, b/n). No D,R,F — so H stays fixed.
+# Maps 6-action index -> 12-action index: U+, U-, L+, L-, B+, B-.
+N_ACTIONS_6 = 6
+ACTION_6_TO_12 = (0, 1, 4, 5, 10, 11)  # u/j=U, k/l=L, b/n=B
+ACTION_6_NAMES = tuple(ACTION_NAMES[i] for i in ACTION_6_TO_12)
 
 # Clockwise turn from face viewpoint expressed as world-axis rotation angle.
 CLOCKWISE_ANGLE_DEG = {
@@ -245,3 +260,20 @@ STICKER_MODEL = tuple(
     }
     for s in _STICKERS
 )
+
+# Cell names a..g and H for the net: slot index -> cell name (physical position).
+# Primary slots: 0=a, 1=b, 2=c, 3=d, 12=g, 13=H, 14=e, 15=f; other slots share cubie with one of these.
+_PRIMARY_SLOT_TO_CELL = {0: "a", 1: "b", 2: "c", 3: "d", 12: "g", 13: "H", 14: "e", 15: "f"}
+_cubie_to_slots: dict[tuple[int, int, int], list[int]] = {}
+for _s in _STICKERS:
+    c = tuple(int(v) for v in _s["cubie"])
+    _cubie_to_slots.setdefault(c, []).append(int(_s["idx"]))
+_PRIMARY = frozenset(_PRIMARY_SLOT_TO_CELL)
+def _slot_to_cell_name(slot: int) -> str:
+    cubie = tuple(int(v) for v in _STICKERS[slot]["cubie"])
+    primary = next(s for s in _cubie_to_slots[cubie] if s in _PRIMARY)
+    return _PRIMARY_SLOT_TO_CELL[primary]
+
+
+SLOT_INDEX_TO_CELL_NAME = tuple(_slot_to_cell_name(i) for i in range(STATE_SIZE))
+assert len(SLOT_INDEX_TO_CELL_NAME) == STATE_SIZE

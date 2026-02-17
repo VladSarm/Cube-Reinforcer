@@ -249,7 +249,7 @@ $\mathbb{A}$ - action space, $a \in \mathbb{A}$ - action
 - Environment: $S_{t+1} \sim p(\cdot\mid S_t, A_t)$
 - Policy: $A_t \sim \pi^{\theta}(\cdot\mid S_t)$
 - Reward: $R_t \sim p^{R}(\cdot\mid S_t, A_t)$
-- Trajectory: $z_{0:T} = \left\{(s_0,a_0), (s_1, a_1),\dots ,(s_{T - 1}, a_{T - 1})\right\}$, where $T$ is the length of the episode
+- Trajectory: $z_{0:T} = \{(s_0,a_0), (s_1,a_1), \dots, (s_{T-1},a_{T-1})\}$, where $T$ is the length of the episode
 
 Policy objective (definition):
 ```math
@@ -299,15 +299,15 @@ Current policy in code:
 
 ### Gradient $\nabla_\theta \log \pi^\theta$
 ```math
-\pi^\theta(a\mid s) = 
+\pi^\theta(a\mid s) = \pi =
 \begin{pmatrix}
-q_{1} \\
-q_2 \\
+\pi_{1} \\
+\pi_2 \\
 \vdots \\
-q_{12}
+\pi_{12}
 \end{pmatrix},
 ```
-where by $q_a$ we denote the probability $\pi^\theta(a\mid s)$ of making action $a \in \mathbb{A}$ in state $s \in \mathbb{S}$.
+where by $\pi_a$ we denote the probability $\pi^\theta(a\mid s)$ of making action $a \in \mathbb{A}$ in state $s \in \mathbb{S}$.
 ```math
 \log(\pi^\theta(a\mid s)) = \log(q_a) = \log\left(\frac{e^{z_a}}{\sum_{j}e^{z_j}}\right) = z_a - \log\left(\sum_{j}e^{z_j}\right)
 ```

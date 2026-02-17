@@ -71,11 +71,11 @@ def concat_and_plot(run_dirs):
             
             has_data = True
             max_step = max(max_step, max(steps))
-
-            # Filter first 1000 steps of each run to prevent jumps
-            cutoff = min(steps) + 1000
+            # Filter first 1000 steps of each run to prevent jumps, except for the oldest run
+            is_oldest = os.path.basename(run_dir) == "run_20260217_205610"
+            cutoff = min(steps) + (0 if is_oldest else 1000)
             indices = [i for i, s in enumerate(steps) if s >= cutoff]
-            
+
             if indices:
                 combined[tag]["steps"].extend([steps[i] + total_offset for i in indices])
                 combined[tag]["values"].extend([values[i] for i in indices])

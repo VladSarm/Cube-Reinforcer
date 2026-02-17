@@ -25,6 +25,8 @@ The repository combines:
 ---
 
 ## Project Overview
+![Demo](media/demo.gif)
+
 The project is focused on RL for a compact but non-trivial combinatorial domain:
 - **Environment**: true 2x2 Rubik cube dynamics.
 - **Action space**: 12 actions (`U/D/L/R/F/B` with `+/-` quarter-turns).
@@ -411,8 +413,9 @@ uv run python scripts/infer_policy.py --host 127.0.0.1 --port 8000 --scramble-st
 _This section is intentionally prepared as a template._
 
 ### 1. Training Curves
-![Experiment: solve rate](docs/images/exp_solve_rate.png)
-![Experiment: average return](docs/images/exp_avg_return.png)
+![Training Curves Part 1](media/combined_plot_part_1.png)
+![Training Curves Part 2](media/combined_plot_part_2.png)
+![Training Curves Part 3](media/combined_plot_part_3.png)
 
 ### 2. Ablations
 - [ ] Reward shaping ablation
@@ -421,8 +424,6 @@ _This section is intentionally prepared as a template._
 - [ ] Scramble curriculum (`--scramble-steps`)
 
 ### 3. Qualitative Evaluation
-![Example rollout 1](docs/images/exp_rollout_1.gif)
-![Example rollout 2](docs/images/exp_rollout_2.gif)
 
 ### 4. Notes
 - TODO: add exact hyperparameter tables.

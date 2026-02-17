@@ -23,7 +23,7 @@ def _validate_color_ids(arr: np.ndarray) -> np.ndarray:
     expected = np.full(N_FACES, STICKERS_PER_FACE, dtype=np.int64)
     if not np.array_equal(counts, expected):
         raise StateValidationError(
-            "Invalid sticker counts; each color 0..5 must appear exactly 4 times"
+            f"Invalid sticker counts; each color 0..5 must appear exactly {STICKERS_PER_FACE} times"
         )
 
     return arr.astype(np.int8, copy=True)
@@ -57,7 +57,7 @@ def _validate_one_hot(one_hot: np.ndarray) -> np.ndarray:
 
 
 def validate_state(state: list[int] | list[list[int]] | np.ndarray) -> np.ndarray:
-    """Validate state and return canonical flat color IDs (length 24)."""
+    """Validate state and return canonical flat color IDs."""
     arr = np.asarray(state)
 
     if arr.ndim == 2:
@@ -70,7 +70,7 @@ def validate_state(state: list[int] | list[list[int]] | np.ndarray) -> np.ndarra
             return _validate_one_hot(arr)
 
     raise StateValidationError(
-        "State must be either color IDs of length 24 or one-hot with shape (24,6)"
+        f"State must be either color IDs of length {STATE_SIZE} or one-hot with shape ({STATE_SIZE},{N_FACES})"
     )
 
 

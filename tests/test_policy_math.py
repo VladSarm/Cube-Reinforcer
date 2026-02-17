@@ -9,8 +9,8 @@ from rubik_rl.policy import LinearSoftmaxPolicy
 class TestPolicyMath(unittest.TestCase):
     def test_softmax_probabilities_sum_to_one(self):
         p = LinearSoftmaxPolicy(seed=1)
-        state = np.zeros((24, 6), dtype=np.float64)
-        state[np.arange(24), np.arange(24) % 6] = 1.0
+        state = np.zeros((54, 6), dtype=np.float64)
+        state[np.arange(54), np.arange(54) % 6] = 1.0
         hist = np.zeros((48,), dtype=np.float64)
         probs = p.action_probs(state, hist)
         self.assertAlmostEqual(float(np.sum(probs)), 1.0, places=6)
@@ -18,8 +18,8 @@ class TestPolicyMath(unittest.TestCase):
 
     def test_autograd_gradient_exists_and_finite(self):
         policy = LinearSoftmaxPolicy(seed=0)
-        state = np.zeros((24, 6), dtype=np.float64)
-        state[np.arange(24), (np.arange(24) * 2) % 6] = 1.0
+        state = np.zeros((54, 6), dtype=np.float64)
+        state[np.arange(54), (np.arange(54) * 2) % 6] = 1.0
         hist = np.zeros((48,), dtype=np.float64)
         hist[3 * 12 + 4] = 1.0
         action, _, log_prob = policy.sample_action(state, hist, return_log_prob=True)
@@ -34,11 +34,11 @@ class TestPolicyMath(unittest.TestCase):
             self.assertTrue(torch.isfinite(p.grad).all().item())
 
     def test_state_flatten_shape(self):
-        state = np.zeros((24, 6), dtype=np.float64)
-        state[np.arange(24), np.arange(24) % 6] = 1.0
+        state = np.zeros((54, 6), dtype=np.float64)
+        state[np.arange(54), np.arange(54) % 6] = 1.0
         hist = np.zeros((48,), dtype=np.float64)
         x = LinearSoftmaxPolicy.build_observation(state, hist)
-        self.assertEqual(x.shape, (192,))
+        self.assertEqual(x.shape, (372,))
 
     def test_batched_sampling_from_logits(self):
         policy = LinearSoftmaxPolicy(seed=0)

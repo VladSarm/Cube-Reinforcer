@@ -1,4 +1,4 @@
-"""REINFORCE training/inference package for Rubik 2x2."""
+"""REINFORCE training/inference package for Rubik 3x3."""
 
 from .policy import LinearSoftmaxPolicy
 from .checkpoint import CheckpointManager

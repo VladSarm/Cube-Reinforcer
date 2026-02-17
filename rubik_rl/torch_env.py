@@ -1,4 +1,4 @@
-"""Batched torch environment for fast Rubik 2x2 training."""
+"""Batched torch environment for fast Rubik 3x3 training."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ from rubik_sim.actions import MOVE_PERMUTATIONS, ORIENTATION_PERMUTATIONS, solve
 
 class TorchRubikBatchEnv:
     ACTION_DIM = 12
-    STATE_SIZE = 24
+    STATE_SIZE = 54
 
     def __init__(self, batch_size: int, device: torch.device):
         self.batch_size = int(batch_size)
         self.device = device
 
-        self.move_perms = torch.as_tensor(MOVE_PERMUTATIONS, dtype=torch.long, device=device)  # [12,24]
-        self.orientation_perms = torch.as_tensor(ORIENTATION_PERMUTATIONS, dtype=torch.long, device=device)  # [24,24]
-        self.solved = torch.as_tensor(solved_state(), dtype=torch.long, device=device)  # [24]
+        self.move_perms = torch.as_tensor(MOVE_PERMUTATIONS, dtype=torch.long, device=device)  # [12,54]
+        self.orientation_perms = torch.as_tensor(ORIENTATION_PERMUTATIONS, dtype=torch.long, device=device)  # [24,54]
+        self.solved = torch.as_tensor(solved_state(), dtype=torch.long, device=device)  # [54]
 
         self.state = torch.empty((self.batch_size, self.STATE_SIZE), dtype=torch.long, device=device)
         self.action_hist = torch.full((self.batch_size, 4), -1, dtype=torch.long, device=device)
@@ -40,19 +40,19 @@ class TorchRubikBatchEnv:
         self.steps[:] = 0
 
     def _apply_actions(self, actions: torch.Tensor, active: torch.Tensor) -> None:
-        perms = self.move_perms[actions]  # [B,24]
+        perms = self.move_perms[actions]  # [B,54]
         moved = torch.gather(self.state, dim=1, index=perms)
         self.state = torch.where(active.unsqueeze(1), moved, self.state)
         self.steps = self.steps + active.long()
 
     def _is_solved_orientation_invariant(self) -> torch.Tensor:
-        # state[:, orientation_perms] => [B,24,24]
+        # state[:, orientation_perms] => [B,24,54]
         oriented = self.state[:, self.orientation_perms]
         solved_mask = (oriented == self.solved.view(1, 1, -1)).all(dim=2).any(dim=1)
         return solved_mask
 
     def build_observation(self) -> torch.Tensor:
-        state_oh = F.one_hot(self.state, num_classes=6).to(torch.float32).reshape(self.batch_size, -1)  # [B,144]
+        state_oh = F.one_hot(self.state, num_classes=6).to(torch.float32).reshape(self.batch_size, -1)  # [B,324]
         hist_oh = torch.zeros((self.batch_size, 4, self.ACTION_DIM), dtype=torch.float32, device=self.device)
         valid = self.action_hist >= 0
         if valid.any():
@@ -60,7 +60,7 @@ class TorchRubikBatchEnv:
             act_idx = self.action_hist[b_idx, slot_idx]
             hist_oh[b_idx, slot_idx, act_idx] = 1.0
         hist_flat = hist_oh.reshape(self.batch_size, -1)  # [B,48]
-        return torch.cat([state_oh, hist_flat], dim=1)  # [B,192]
+        return torch.cat([state_oh, hist_flat], dim=1)  # [B,372]
 
     def scramble(self, scramble_steps: int, generator: torch.Generator) -> torch.Tensor:
         steps = int(scramble_steps)

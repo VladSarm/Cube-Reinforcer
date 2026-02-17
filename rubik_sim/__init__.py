@@ -1,4 +1,4 @@
-"""Rubik 2x2 simulator package."""
+"""Rubik 3x3 simulator package."""
 
 from .engine import RubikEngine
 from .solved_check import is_solved_orientation_invariant

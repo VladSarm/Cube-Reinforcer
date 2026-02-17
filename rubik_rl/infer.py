@@ -12,7 +12,7 @@ from .client import RubikAPIClient
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run inference policy for Rubik 2x2")
+    p = argparse.ArgumentParser(description="Run inference policy for Rubik 3x3")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--scramble-steps", type=int, required=True)

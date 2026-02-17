@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from rubik_sim.actions import ACTION_TABLE, FACE_INDEX, MOVE_PERMUTATIONS, STICKERS_PER_FACE
 from rubik_sim.engine import RubikEngine
 
 
@@ -39,6 +40,25 @@ class TestEngineMoves(unittest.TestCase):
         _, actions = e.scramble(steps=200, seed=99)
         for prev_a, next_a in zip(actions[:-1], actions[1:]):
             self.assertNotEqual(next_a, (prev_a ^ 1))
+
+    def test_turn_moves_face_and_adjacent_strips(self):
+        """Regression: face turns must move side strips too (not face-only rotation)."""
+        base = np.arange(STICKERS_PER_FACE * 6, dtype=np.int32)
+        for action in range(12):
+            face, _ = ACTION_TABLE[action]
+            perm = MOVE_PERMUTATIONS[action]
+            moved = base[perm]
+            changed = moved != base
+
+            face_start = FACE_INDEX[face] * STICKERS_PER_FACE
+            face_end = face_start + STICKERS_PER_FACE
+            changed_on_face = int(changed[face_start:face_end].sum())
+            changed_total = int(changed.sum())
+            changed_off_face = changed_total - changed_on_face
+
+            self.assertEqual(changed_on_face, 8, msg=f"action={action} {face}: expected 8 moved on turning face")
+            self.assertEqual(changed_off_face, 12, msg=f"action={action} {face}: expected 12 moved on adjacent strips")
+            self.assertEqual(changed_total, 20, msg=f"action={action} {face}: expected total moved stickers=20")
 
 
 if __name__ == "__main__":

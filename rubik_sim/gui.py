@@ -1,4 +1,4 @@
-"""Pygame GUI for the 2x2 Rubik simulator."""
+"""Pygame GUI for the 3x3 Rubik simulator."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .actions import (
     CLOCKWISE_ANGLE_DEG,
     FACE_AXIS_LAYER,
     FACE_INDEX,
+    FACE_SIZE,
     FACE_SPECS,
     STICKER_MODEL,
 )
@@ -90,7 +91,7 @@ class RubikGUI:
         pygame.init()
         self.size = (960, 640)
         self.screen = pygame.display.set_mode(self.size)
-        pygame.display.set_caption("Rubik 2x2 Simulator")
+        pygame.display.set_caption("Rubik 3x3 Simulator")
         self.clock = pygame.time.Clock()
 
         self.font = pygame.font.SysFont("monospace", 18)
@@ -146,10 +147,12 @@ class RubikGUI:
         r = np.array(spec["right"], dtype=np.float64)
         up = np.array(spec["up"], dtype=np.float64)
 
-        a0 = -1.0 + col
-        a1 = a0 + 1.0
-        b_top = 1.0 - row
-        b_bottom = b_top - 1.0
+        # Map 3x3 row/col to local face coordinates in [-1, 1] with cell width 2/3.
+        cell = 2.0 / FACE_SIZE
+        a0 = -1.0 + col * cell
+        a1 = a0 + cell
+        b_top = 1.0 - row * cell
+        b_bottom = b_top - cell
 
         p00 = n + a0 * r + b_top * up
         p10 = n + a1 * r + b_top * up
@@ -247,14 +250,14 @@ class RubikGUI:
 
     def _draw_cube(self):
         if self.animating and self.anim_base_state is not None:
-            state = self.anim_base_state.reshape(6, 4)
+            state = self.anim_base_state.reshape(6, FACE_SIZE * FACE_SIZE)
         else:
-            state = self.engine.get_state().reshape(6, 4)
+            state = self.engine.get_state().reshape(6, FACE_SIZE * FACE_SIZE)
 
         draw_items = []
         for meta in STICKER_MODEL:
             face_idx = FACE_INDEX[meta["face"]]
-            sticker_idx = int(meta["row"]) * 2 + int(meta["col"])
+            sticker_idx = int(meta["row"]) * FACE_SIZE + int(meta["col"])
             color_id = int(state[face_idx, sticker_idx])
 
             poly_world = self._sticker_vertices(meta)

@@ -23,7 +23,7 @@ class TestSolvedCheck(unittest.TestCase):
 
     def test_corrupted_state_is_false(self):
         state = solved_state().copy()
-        state[0], state[4] = state[4], state[0]
+        state[0], state[9] = state[9], state[0]
         self.assertFalse(is_solved_orientation_invariant(state))
 
 

@@ -45,6 +45,24 @@ class TestCheckpoint(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(episode, big_ep)
 
+    def test_incompatible_checkpoint_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            mgr = CheckpointManager(td)
+            bad_path = Path(td) / "policy_ep0001234.pt"
+            torch.save(
+                {
+                    "episode": 1234,
+                    "model_state_dict": {
+                        "linear1.weight": torch.randn(10, 10),
+                        "linear1.bias": torch.randn(10),
+                    },
+                },
+                bad_path,
+            )
+            loaded, episode = mgr.load_latest()
+            self.assertIsNone(loaded)
+            self.assertEqual(episode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

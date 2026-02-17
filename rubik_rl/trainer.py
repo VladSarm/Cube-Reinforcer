@@ -119,7 +119,7 @@ class ReinforceTrainer:
         log_probs = torch.zeros((T, B), dtype=torch.float32, device=self.device)
 
         for t in range(T):
-            obs = self.env.build_observation()  # [B,192]
+            obs = self.env.build_observation()  # [B,372]
             logits = self.policy.forward_logits(obs)  # [B,12]
             actions, lp = LinearSoftmaxPolicy.sample_actions_from_logits(logits)
 
@@ -279,7 +279,7 @@ class ReinforceTrainer:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Train REINFORCE policy for Rubik 2x2 (PyTorch batched torch-env mode)")
+    p = argparse.ArgumentParser(description="Train REINFORCE policy for Rubik 3x3 (PyTorch batched torch-env mode)")
     p.add_argument("--num-envs", type=int, default=1, help="Batch size of parallel environments")
     p.add_argument("--episodes", type=int, required=True)
     p.add_argument("--max-episode-steps", type=int, default=200)

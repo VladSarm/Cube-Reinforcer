@@ -1,9 +1,9 @@
 # Cube-Reinforcer
 
-`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a PyTorch REINFORCE pipeline.
+`Cube-Reinforcer` is a research-style project about solving the **3x3 Rubik’s Cube** with a custom simulator and a PyTorch REINFORCE pipeline.
 
 The repository combines:
-- a mathematically correct 2x2 cube engine with 12 discrete actions,
+- a mathematically correct 3x3 cube engine with 12 discrete actions,
 - a GUI + HTTP simulator API for control and visualization,
 - a policy-gradient training stack for RL experiments.
 
@@ -12,7 +12,7 @@ The repository combines:
 ## Table of Contents
 1. [Project Overview](#project-overview)
 2. [Why This Problem Is Hard](#why-this-problem-is-hard)
-3. [2x2 Rubik Cube Facts](#2x2-rubik-cube-facts)
+3. [3x3 Rubik Cube Facts](#3x3-rubik-cube-facts)
 4. [Repository Structure](#repository-structure)
 5. [Installation](#installation)
 6. [Running Tests](#running-tests)
@@ -26,9 +26,9 @@ The repository combines:
 
 ## Project Overview
 The project is focused on RL for a compact but non-trivial combinatorial domain:
-- **Environment**: true 2x2 Rubik cube dynamics.
+- **Environment**: true 3x3 Rubik cube dynamics.
 - **Action space**: 12 actions (`U/D/L/R/F/B` with `+/-` quarter-turns).
-- **State**: one-hot stickers (`24 x 6`), with additional one-hot history of the last 4 actions.
+- **State**: one-hot stickers (`54 x 6`), with additional one-hot history of the last 4 actions.
 - **Policy**: two-layer neural network implemented in PyTorch.
 - **Algorithm**: REINFORCE with discounted returns (no learned value network).
 
@@ -40,7 +40,7 @@ Main goals:
 ---
 
 ## Why This Problem Is Hard
-Even for a 2x2 cube, the task is difficult for RL because:
+Even for a 3x3 cube, the task is difficult for RL because:
 - transitions are deterministic but highly non-linear in sticker space,
 - rewards are sparse if only solved/not solved is used,
 - local action effects are deceptive (easy to undo progress),
@@ -54,10 +54,10 @@ From an engineering perspective, complexity comes from:
 
 ---
 
-## 2x2 Rubik Cube Facts
-- The 2x2 cube (Pocket Cube) has **3,674,160 reachable states**.
-- Every state is solvable in at most **11 face turns** in the standard optimal metric for 2x2.
-- Unlike 3x3, 2x2 has only corner cubies (no fixed centers/edges), but orientation/permutation constraints still make the space highly structured.
+## 3x3 Rubik Cube Facts
+- The standard 3x3 cube has about **43 quintillion reachable states**.
+- In the face-turn metric, every 3x3 state is solvable in at most **20 moves** ("God's Number").
+- Compared with 2x2, 3x3 introduces edges and fixed centers, increasing combinatorial complexity significantly.
 
 ---
 
@@ -123,13 +123,13 @@ The tests cover:
 ## Simulator
 ### Purpose
 The simulator provides:
-- exact 2x2 dynamics for RL,
+- exact 3x3 dynamics for RL,
 - one-hot state API for agents,
 - GUI for interactive inspection and animated evaluation.
 
 ### Full Functionality
-- True 2x2 cube transitions via precomputed sticker permutations.
-- `cube_size` hyperparameter exposed in CLI (`v1` supports only `2`).
+- True 3x3 cube transitions via precomputed sticker permutations.
+- Hard-cut runtime: only `cube_size=3` is supported.
 - Scramble with optional seed.
 - Scramble logic excludes immediate inverse of the previous scramble action.
 - Orientation-invariant solved check.
@@ -153,12 +153,12 @@ The simulator provides:
 - `ESC` or `Q`: quit.
 
 ### State and Observation Format
-- API state format: one-hot matrix `shape = (24, 6)`.
-- Internally, color IDs are also supported as flat length-24 vectors.
+- API state format: one-hot matrix `shape = (54, 6)`.
+- Internally, color IDs are also supported as flat length-54 vectors.
 - RL observation:
-  - cube one-hot: `24 * 6 = 144`,
+  - cube one-hot: `54 * 6 = 324`,
   - action history one-hot (last 4 actions): `4 * 12 = 48`,
-  - total input size: `192`.
+  - total input size: `372`.
 
 ### Action Index Table
 | Action | Meaning |
@@ -263,10 +263,10 @@ $$
 
 ### Network Structure
 Current policy in code:
-- input $x\in\mathbb{R}^{192}$,
+- input $x\in\mathbb{R}^{372}$,
 - first affine layer:
   $$
-  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
+  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{372\times 512}
   $$
 - first activation:
   $$
@@ -432,6 +432,7 @@ _This section is intentionally prepared as a template._
 ---
 
 ## Current Limits and Notes
-- `cube_size` is exposed, but v1 supports only `2`.
+- The runtime is hard-cut to `cube_size=3` (no 2x2 mode).
+- Only `.pt` checkpoints are supported; incompatible old checkpoints are skipped with warning.
 - `pygame` may print a `pkg_resources` deprecation warning; this is external to project logic.
 - For reproducibility, keep checkpoint directory and CLI args saved with runs.

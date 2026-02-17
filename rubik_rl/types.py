@@ -9,7 +9,7 @@ import numpy as np
 
 @dataclass
 class Transition:
-    state_one_hot: np.ndarray  # shape (24, 6)
+    state_one_hot: np.ndarray  # shape (54, 6)
     action_history_one_hot: np.ndarray  # shape (48,)
     action: int
     reward: float

@@ -41,13 +41,13 @@ class TestAPI(unittest.TestCase):
         self.assertIn("state", out)
         self.assertIn("solved", out)
         self.assertEqual(out["action"], 8)
-        self.assertEqual(len(out["state"]), 24)
+        self.assertEqual(len(out["state"]), 54)
         self.assertEqual(len(out["state"][0]), 6)
         self.assertEqual(sum(out["state"][0]), 1)
 
     def test_state_roundtrip_set_get(self):
         colors = solved_state().tolist()
-        colors[0], colors[4] = colors[4], colors[0]
+        colors[0], colors[9] = colors[9], colors[0]
         target = state_to_json_one_hot(colors)
 
         status, _ = http_json("POST", f"{self.base}/state", {"state": target})

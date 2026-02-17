@@ -1,4 +1,4 @@
-"""Action and geometry utilities for the 2x2 Rubik simulator."""
+"""Action and geometry utilities for the 3x3 Rubik simulator."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import numpy as np
 FACE_ORDER = ("U", "R", "F", "D", "L", "B")
 FACE_INDEX = {face: i for i, face in enumerate(FACE_ORDER)}
 N_FACES = 6
-STICKERS_PER_FACE = 4
+FACE_SIZE = 3
+STICKERS_PER_FACE = FACE_SIZE * FACE_SIZE
 STATE_SIZE = N_FACES * STICKERS_PER_FACE
 
 # Face specification from outside view.
@@ -62,7 +63,7 @@ FACE_AXIS_LAYER = {
 
 
 def solved_state() -> np.ndarray:
-    """Return the canonical solved flat state of length 24."""
+    """Return the canonical solved flat state of length 54."""
     return np.repeat(np.arange(N_FACES, dtype=np.int8), STICKERS_PER_FACE)
 
 
@@ -98,13 +99,15 @@ def _build_sticker_model() -> tuple[list[dict[str, np.ndarray]], dict[tuple[int,
         up = np.array(spec["up"], dtype=np.int8)
         normal_to_face[tuple(int(v) for v in n)] = face
 
-        for row in range(2):
-            for col in range(2):
-                col_sign = -1 if col == 0 else +1
-                row_sign = +1 if row == 0 else -1
+        for row in range(FACE_SIZE):
+            for col in range(FACE_SIZE):
+                # row/col -> signed offsets in {-1,0,1} with image-like indexing.
+                col_sign = col - 1
+                row_sign = 1 - row
+                # Sticker center sits on the face plane; cubie coordinate stays in {-1,0,1}.
                 center = 2 * n + col_sign * r + row_sign * up
-                cubie = center - n
-                idx = FACE_INDEX[face] * STICKERS_PER_FACE + row * 2 + col
+                cubie = n + col_sign * r + row_sign * up
+                idx = FACE_INDEX[face] * STICKERS_PER_FACE + row * FACE_SIZE + col
                 stickers.append(
                     {
                         "idx": idx,
@@ -134,11 +137,11 @@ def _face_row_col_from_center(face: str, center: np.ndarray) -> tuple[int, int]:
     col_sign = int(np.dot(offset, r))
     row_sign = int(np.dot(offset, up))
 
-    if col_sign not in (-1, 1) or row_sign not in (-1, 1):
+    if col_sign not in (-1, 0, 1) or row_sign not in (-1, 0, 1):
         raise ValueError(f"Invalid center for face {face}: {center}")
 
-    col = 0 if col_sign == -1 else 1
-    row = 0 if row_sign == +1 else 1
+    col = col_sign + 1
+    row = 1 - row_sign
     return row, col
 
 
@@ -158,7 +161,7 @@ def _generate_face_turn_permutation(face: str, direction: int) -> np.ndarray:
         old_idx = int(sticker["idx"])
         center = sticker["center"]
         normal = sticker["normal"]
-        cubie = center - normal
+        cubie = sticker["cubie"]
 
         if int(cubie[axis_idx]) == layer_sign:
             new_center = rot @ center
@@ -169,7 +172,7 @@ def _generate_face_turn_permutation(face: str, direction: int) -> np.ndarray:
 
         face_new = _NORMAL_TO_FACE[tuple(int(v) for v in new_normal)]
         row_new, col_new = _face_row_col_from_center(face_new, new_center)
-        new_idx = FACE_INDEX[face_new] * STICKERS_PER_FACE + row_new * 2 + col_new
+        new_idx = FACE_INDEX[face_new] * STICKERS_PER_FACE + row_new * FACE_SIZE + col_new
         perm[new_idx] = old_idx
 
     return perm
@@ -222,7 +225,7 @@ def _generate_orientation_permutations() -> np.ndarray:
 
             face_new = _NORMAL_TO_FACE[tuple(int(v) for v in new_normal)]
             row_new, col_new = _face_row_col_from_center(face_new, new_center)
-            new_idx = FACE_INDEX[face_new] * STICKERS_PER_FACE + row_new * 2 + col_new
+            new_idx = FACE_INDEX[face_new] * STICKERS_PER_FACE + row_new * FACE_SIZE + col_new
             perm[new_idx] = old_idx
         perms[i] = perm
 

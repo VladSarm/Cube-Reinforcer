@@ -1,4 +1,4 @@
-"""PyTorch policy network for Rubik 2x2 REINFORCE."""
+"""PyTorch policy network for Rubik 3x3 REINFORCE."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import torch.nn as nn
 
 
 class LinearSoftmaxPolicy(nn.Module):
-    """Three-layer policy: x(192) -> 512 -> ELU -> 128 -> ELU -> 12 -> softmax."""
+    """Three-layer policy: x(372) -> 512 -> ELU -> 128 -> ELU -> 12 -> softmax."""
 
-    INPUT_DIM = 24 * 6 + 4 * 12
+    INPUT_DIM = 54 * 6 + 4 * 12
     HIDDEN_DIM_1 = 512
     HIDDEN_DIM_2 = 128
     ACTION_DIM = 12
@@ -36,8 +36,8 @@ class LinearSoftmaxPolicy(nn.Module):
     @staticmethod
     def flatten_state_one_hot(state_one_hot: np.ndarray) -> np.ndarray:
         arr = np.asarray(state_one_hot, dtype=np.float32)
-        if arr.shape != (24, 6):
-            raise ValueError(f"state_one_hot must have shape (24, 6), got {arr.shape}")
+        if arr.shape != (54, 6):
+            raise ValueError(f"state_one_hot must have shape (54, 6), got {arr.shape}")
         return arr.reshape(-1)
 
     @staticmethod

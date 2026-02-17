@@ -21,13 +21,13 @@ def _load_state(state_json: str | None, state_file: str | None):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Rubik 2x2 simulator")
+    parser = argparse.ArgumentParser(description="Rubik 3x3 simulator")
     sub = parser.add_subparsers(dest="mode", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--host", default="127.0.0.1")
     common.add_argument("--port", type=int, default=8000)
-    common.add_argument("--cube-size", type=int, default=2)
+    common.add_argument("--cube-size", type=int, default=3, choices=[3])
     common.add_argument("--state-json", type=str, default=None)
     common.add_argument("--state-file", type=str, default=None)
 

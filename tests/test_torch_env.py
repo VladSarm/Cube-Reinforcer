@@ -10,6 +10,7 @@ from rubik_sim.engine import RubikEngine
 
 class TestTorchEnv(unittest.TestCase):
     def test_step_matches_engine_sequence(self):
+        # This guarantees training backend transitions match simulator/GUI engine transitions.
         device = torch.device("cpu")
         env = TorchRubikBatchEnv(batch_size=4, device=device)
         env.reset()
@@ -39,6 +40,10 @@ class TestTorchEnv(unittest.TestCase):
                     continue
                 r.step(int(a[i].item()))
                 ref_done[i] = r.is_solved()
+                self.assertTrue(
+                    np.array_equal(env.state[i].cpu().numpy(), r.get_state()),
+                    msg=f"Mismatch at step={t}, env_idx={i}",
+                )
 
         for i, r in enumerate(refs):
             self.assertTrue(np.array_equal(env.state[i].cpu().numpy(), r.get_state()))

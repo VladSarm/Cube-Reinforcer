@@ -1,4 +1,4 @@
-"""Core 2x2 Rubik simulator engine."""
+"""Core 3x3 Rubik simulator engine."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from .state_codec import StateValidationError, state_to_json_one_hot, validate_s
 
 
 class RubikEngine:
-    """Thread-safe 2x2 simulator engine with 12 actions."""
+    """Thread-safe 3x3 simulator engine with 12 actions."""
 
-    def __init__(self, cube_size: int = 2, initial_state: list[int] | np.ndarray | None = None):
-        if cube_size != 2:
-            raise ValueError("Only cube_size=2 is supported in v1")
+    def __init__(self, cube_size: int = 3, initial_state: list[int] | np.ndarray | None = None):
+        if cube_size != 3:
+            raise ValueError("Only cube_size=3 is supported")
 
         self.cube_size = cube_size
         self._lock = threading.RLock()
@@ -28,7 +28,7 @@ class RubikEngine:
         self.history: list[int] = []
 
     def get_state(self) -> np.ndarray:
-        """Return internal flat color-id state (length 24)."""
+        """Return internal flat color-id state (length 54)."""
         with self._lock:
             return self._state.copy()
 

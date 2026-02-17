@@ -252,34 +252,34 @@ G_t = \sum_{k=0}^{T-t-1}\gamma^k r_{t+k+1}
 ```
 
 Policy objective:
-$$
+```math
 J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_t G_t \log \pi_\theta(a_t\mid s_t)\right]
-$$
+```
 
 Gradient estimator:
-$$
+```math
 \nabla_\theta J(\theta)\approx \sum_t G_t \nabla_\theta \log \pi_\theta(a_t\mid s_t)
-$$
+```
 
 ### Network Structure
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
-  $$
+  ```math
   h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
-  $$
+  ```
 - activation:
-  $$
+  ```math
   h = \text{ELU}(h_{\text{pre}})
-  $$
+  ```
 - output affine layer:
-  $$
+  ```math
   z = hW_2 + b_2,\quad W_2\in\mathbb{R}^{128\times 12}
-  $$
+  ```
 - action probabilities:
-  $$
+  ```math
   \pi = \text{softmax}(z)
-  $$
+  ```
 
 ### Manual Gradient Derivation (Implemented)
 For sampled action $a$ and one-hot $e_a$:

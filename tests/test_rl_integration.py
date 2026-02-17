@@ -43,11 +43,12 @@ class TestRLIntegration(unittest.TestCase):
                 scramble_steps=2,
                 gamma=1.0,
                 lr=0.01,
+                device="cpu",
+                tensorboard_logdir=f"{td}/tb",
                 save_every=1,
                 checkpoint_dir=td,
                 seed=123,
                 log_interval=1,
-                stats_window=10,
             )
             trainer = ReinforceTrainer(train_args)
             trainer.run()

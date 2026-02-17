@@ -283,27 +283,27 @@ Current policy in code:
 
 ### Manual Gradient Derivation (Implemented)
 For sampled action $a$ and one-hot $e_a$:
-$$
+```math
 \delta = \frac{\partial \log \pi_\theta(a\mid s)}{\partial z} = e_a - \pi
-$$
+```
 Then:
-$$
+```math
 \frac{\partial \log \pi}{\partial W_2} = h^\top \delta,\qquad
 \frac{\partial \log \pi}{\partial b_2} = \delta
-$$
-$$
+```
+```math
 g_h = W_2\delta,\qquad
 g_{\text{pre}} = g_h \odot \text{ELU}'(h_{\text{pre}})
-$$
-$$
+```
+```math
 \frac{\partial \log \pi}{\partial W_1} = x^\top g_{\text{pre}},\qquad
 \frac{\partial \log \pi}{\partial b_1} = g_{\text{pre}}
-$$
+```
 
 Batch update (average over parallel environments):
-$$
+```math
 \Delta\theta = \frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\nabla_\theta \log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
-$$
+```
 
 ### Reward Shaping
 Default reward components:

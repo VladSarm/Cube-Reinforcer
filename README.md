@@ -247,9 +247,9 @@ Notation follows standard REINFORCE lecture style:
 - trajectory: $\tau = (s_0,a_0,r_1,\dots,s_T)$
 - policy: $\pi_\theta(a_t\mid s_t)$
 - discounted return:
-  $$
-  G_t = \sum_{k=0}^{T-t-1}\gamma^k r_{t+k+1}
-  $$
+```math
+G_t = \sum_{k=0}^{T-t-1}\gamma^k r_{t+k+1}
+```
 
 Policy objective:
 $$

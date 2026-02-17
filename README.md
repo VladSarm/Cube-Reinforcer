@@ -267,7 +267,7 @@ Current policy in code:
 - first affine layer:
 ```math
   h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
- ```
+```
 - activation:
   ```math
   h = \text{ELU}(h_{\text{pre}})

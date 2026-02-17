@@ -12,6 +12,7 @@ import torch
 
 from .policy import LinearSoftmaxPolicy
 from .policy_sparse import SparseLinearSoftmaxPolicy
+from .policy_sparse_torch import SparsePolicyTorch
 
 
 def load_sparse_latest(checkpoint_dir: str = "checkpoints_sparse") -> tuple[SparseLinearSoftmaxPolicy | None, int]:
@@ -45,6 +46,26 @@ def load_sparse_latest(checkpoint_dir: str = "checkpoints_sparse") -> tuple[Spar
         except Exception:
             pass
     return policy, episode
+
+
+def load_sparse_torch_latest(checkpoint_dir: str = "checkpoints_sparse_torch") -> tuple[SparsePolicyTorch | None, int]:
+    """Load latest SparsePolicyTorch checkpoint (.pt) from directory. Returns (policy, episode)."""
+    dir_path = Path(checkpoint_dir)
+    if not dir_path.is_dir():
+        return None, 0
+    pattern = re.compile(r"policy_ep(\d+)\.pt$")
+    best_ep, best_path = -1, None
+    for p in dir_path.glob("policy_ep*.pt"):
+        m = pattern.search(p.name)
+        if m:
+            ep = int(m.group(1))
+            if ep > best_ep:
+                best_ep, best_path = ep, p
+    if best_path is None:
+        return None, 0
+    data = torch.load(best_path, map_location="cpu")
+    policy = SparsePolicyTorch.from_state_dict(data["model_state_dict"])
+    return policy, int(data.get("episode", 0))
 
 
 class CheckpointManager:

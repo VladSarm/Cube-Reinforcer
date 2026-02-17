@@ -1,23 +1,25 @@
-# Sparse REINFORCE: 7 cells (a..g), 6 actions (U/L/B), H fixed.
-# Training and policy parameters. CLI args override these when provided.
+# Sparse REINFORCE (PyTorch): 7 cells (a..g), 6 actions (U/L/B), H fixed.
+# Architecture: obs(31) -> 512 -> ELU -> 128 -> ELU -> 6
+# Observation: sparse_state(7) + action_history_one_hot(4*6=24) -> input_dim=31
 
 policy:
-  # Observation: sparse_state(7) + action_history_one_hot(4*6=24) -> input_dim=31
-  input_dim: 19
-  hidden_dim: 128
+  input_dim: 31          # 7 sparse bits + 4*6 action history one-hot
+  hidden_dim_1: 512
+  hidden_dim_2: 128
   action_dim: 6
-  history_len: 2
-  init_scale: 0.01
+  history_len: 4
 
 training:
-  num_envs: 12
-  episodes: 1000000
-  scramble_steps: 6
-  max_episode_steps: 30
+  device: cuda
+  num_envs: 4096         # max safe batch on RTX 3070 Ti 8GB (peak ~4.2 GB VRAM with T=200)
+  episodes: 5000000
+  scramble_steps: 1      # curriculum starts at 1, grows to 10 when SR > 80%
+  max_episode_steps: 200
   gamma: 1.0
-  lr: 0.001
-  save_every: 20000
-  checkpoint_dir: checkpoints_sparse
+  lr: 3.0e-4
+  save_every: 50000
+  checkpoint_dir: checkpoints_sparse_torch
+  tensorboard_logdir: runs/cube_reinforcer_sparse
   seed: null
   log_interval: 1000
-  stats_window: 1000
+  repeat_penalty: 1.0    # penalty for 3rd consecutive identical action

@@ -10,7 +10,7 @@ import traceback
 import numpy as np
 import pygame
 
-from rubik_rl.checkpoint import CheckpointManager, load_sparse_latest
+from rubik_rl.checkpoint import CheckpointManager, load_sparse_latest, load_sparse_torch_latest
 from .actions import (
     ACTION_6_TO_12,
     ACTION_NAMES,
@@ -146,6 +146,7 @@ class RubikGUI:
         self.reset_btn = pygame.Rect(240, 560, 180, 44)
         self.eval_btn = pygame.Rect(440, 560, 200, 44)
         self.eval_sparse_btn = pygame.Rect(40, 610, 200, 44)
+        self.eval_sparse_torch_btn = pygame.Rect(250, 610, 220, 44)
         self.eval_anti_repeat_checkbox = pygame.Rect(664, 570, 24, 24)
 
         self.yaw = -0.75
@@ -169,6 +170,9 @@ class RubikGUI:
         self.eval_sparse_enabled = False
         self.eval_sparse_policy = None
         self.eval_sparse_checkpoint_dir = "checkpoints_sparse"
+        self.eval_sparse_torch_enabled = False
+        self.eval_sparse_torch_policy = None
+        self.eval_sparse_torch_checkpoint_dir = "checkpoints_sparse_torch"
         self.eval_anti_repeat_enabled = False
         self.eval_action_history: list[int] = []
         self.eval_runs_solved = 0
@@ -410,11 +414,13 @@ class RubikGUI:
     def _draw_buttons(self):
         eval_label = "Eval: ON" if self.eval_enabled else "Eval: OFF"
         eval_sparse_label = "Eval Sparse: ON" if self.eval_sparse_enabled else "Eval Sparse: OFF"
+        eval_sparse_torch_label = "Eval SpTorch: ON" if self.eval_sparse_torch_enabled else "Eval SpTorch: OFF"
         for rect, label in (
             (self.scramble_btn, "Scramble"),
             (self.reset_btn, "Reset"),
             (self.eval_btn, eval_label),
             (self.eval_sparse_btn, eval_sparse_label),
+            (self.eval_sparse_torch_btn, eval_sparse_torch_label),
         ):
             pygame.draw.rect(self.screen, BUTTON, rect, border_radius=8)
             pygame.draw.rect(self.screen, BUTTON_BORDER, rect, width=2, border_radius=8)
@@ -492,17 +498,49 @@ class RubikGUI:
         self.eval_action_history = []
         print(f"eval_sparse enabled (checkpoint episode={episode})")
 
+    def _toggle_eval_sparse_torch(self):
+        if self.eval_sparse_torch_enabled:
+            self.eval_sparse_torch_enabled = False
+            self.eval_action_history = []
+            self.eval_runs_total += 1
+            print("eval_sparse_torch disabled")
+            return
+        self.eval_enabled = False
+        self.eval_sparse_enabled = False
+        policy, episode = load_sparse_torch_latest(self.eval_sparse_torch_checkpoint_dir)
+        if policy is None:
+            print(f"eval_sparse_torch cannot enable: no checkpoints in '{self.eval_sparse_torch_checkpoint_dir}'")
+            return
+        self.eval_sparse_torch_policy = policy
+        self.eval_sparse_torch_enabled = True
+        self.eval_action_history = []
+        print(f"eval_sparse_torch enabled (checkpoint episode={episode})")
+
     @staticmethod
-    def _second_best_action(probs: np.ndarray, best_action: int) -> int:
-        order = np.argsort(probs)
-        for idx in range(len(order) - 1, -1, -1):
-            cand = int(order[idx])
-            if cand != best_action:
-                return cand
-        return int(best_action)
+    def _is_bad_pattern(history: list[int], candidate: int) -> bool:
+        """True if adding candidate creates a wasteful pattern:
+        - repeat-3: last 2 actions == candidate (a,a,a)
+        - oscillate: last 3 actions form a,b,a and candidate==b where b==a^1  (a,b,a,b)
+        """
+        h = history
+        # repeat-3: [..., a, a, candidate] where a == candidate
+        if len(h) >= 2 and h[-1] == candidate and h[-2] == candidate:
+            return True
+        # oscillate: [..., a, b, a, candidate==b] where b == a^1
+        if len(h) >= 3 and h[-1] == h[-3] and h[-2] == (h[-3] ^ 1) and candidate == h[-2]:
+            return True
+        return False
+
+    def _best_allowed_action(self, probs: np.ndarray, history: list[int]) -> int:
+        """Return highest-prob action that doesn't create a bad pattern."""
+        order = np.argsort(probs)[::-1]
+        for cand in order:
+            if not self._is_bad_pattern(history, int(cand)):
+                return int(cand)
+        return int(order[0])  # fallback: all bad, pick best anyway
 
     def _eval_tick(self):
-        eval_active = self.eval_enabled or self.eval_sparse_enabled
+        eval_active = self.eval_enabled or self.eval_sparse_enabled or self.eval_sparse_torch_enabled
         if not eval_active:
             return
         if self.animating:
@@ -512,11 +550,34 @@ class RubikGUI:
             self.eval_runs_solved += 1
             self.eval_runs_total += 1
             rate = self.eval_runs_solved / self.eval_runs_total
-            mode = "eval_sparse" if self.eval_sparse_enabled else "eval"
+            if self.eval_sparse_torch_enabled:
+                mode = "eval_sparse_torch"
+            elif self.eval_sparse_enabled:
+                mode = "eval_sparse"
+            else:
+                mode = "eval"
             print(f"{mode} finished: solved in {steps} steps | session success_rate={self.eval_runs_solved}/{self.eval_runs_total} ({rate:.1%})")
             self.eval_enabled = False
             self.eval_sparse_enabled = False
+            self.eval_sparse_torch_enabled = False
             self.eval_action_history = []
+            return
+
+        if self.eval_sparse_torch_enabled:
+            if self.eval_sparse_torch_policy is None:
+                self.eval_sparse_torch_enabled = False
+                self.eval_action_history = []
+                return
+            history_snapshot = list(self.engine.history)
+            state_sparse = _sparse_state_from_engine(self.engine, history_snapshot)
+            hist_oh = self.eval_sparse_torch_policy.history_one_hot(self.eval_action_history)
+            action_6, probs = self.eval_sparse_torch_policy.sample_action(state_sparse, hist_oh)
+            if self.eval_anti_repeat_enabled:
+                action_6 = self._best_allowed_action(probs, self.eval_action_history)
+            self._start_action_animation(ACTION_6_TO_12[action_6], duration_ms=self._default_anim_duration_ms)
+            self.eval_action_history.append(int(action_6))
+            if len(self.eval_action_history) > 8:
+                self.eval_action_history = self.eval_action_history[-8:]
             return
 
         if self.eval_sparse_enabled:
@@ -529,11 +590,7 @@ class RubikGUI:
             hist_oh = self.eval_sparse_policy.history_one_hot(self.eval_action_history)
             action_6, probs = self.eval_sparse_policy.sample_action(state_sparse, hist_oh)
             if self.eval_anti_repeat_enabled:
-                recent = self.eval_action_history[-4:]
-                if len(recent) == 4 and all(a == action_6 for a in recent):
-                    alt = self._second_best_action(probs, action_6)
-                    if alt != action_6:
-                        action_6 = alt
+                action_6 = self._best_allowed_action(probs, self.eval_action_history)
             self._start_action_animation(ACTION_6_TO_12[action_6], duration_ms=self._default_anim_duration_ms)
             self.eval_action_history.append(int(action_6))
             if len(self.eval_action_history) > 8:
@@ -556,6 +613,21 @@ class RubikGUI:
         self.eval_action_history.append(int(action))
         if len(self.eval_action_history) > 8:
             self.eval_action_history = self.eval_action_history[-8:]
+
+    def _scramble_6actions(self, steps: int) -> None:
+        """Scramble using only the 6-action subset (H face fixed). Avoids inverse of last action."""
+        rng = np.random.default_rng()
+        actions_6 = np.array(ACTION_6_TO_12, dtype=np.int32)
+        prev_action: int | None = None
+        for _ in range(steps):
+            if prev_action is not None:
+                inverse_action = prev_action ^ 1
+                candidates = actions_6[actions_6 != inverse_action]
+            else:
+                candidates = actions_6
+            action = int(rng.choice(candidates))
+            self.engine.step(action)
+            prev_action = action
 
     def run(self):
         self.server.start_background(daemon=True)
@@ -588,7 +660,7 @@ class RubikGUI:
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         if self.scramble_btn.collidepoint(event.pos):
                             if not self.animating:
-                                self.engine.scramble(self.scramble_steps)
+                                self._scramble_6actions(self.scramble_steps)
                                 self.eval_action_history = []
                         elif self.reset_btn.collidepoint(event.pos):
                             if not self.animating:
@@ -598,6 +670,8 @@ class RubikGUI:
                             self._toggle_eval()
                         elif self.eval_sparse_btn.collidepoint(event.pos):
                             self._toggle_eval_sparse()
+                        elif self.eval_sparse_torch_btn.collidepoint(event.pos):
+                            self._toggle_eval_sparse_torch()
                         elif self.eval_anti_repeat_checkbox.collidepoint(event.pos):
                             self.eval_anti_repeat_enabled = not self.eval_anti_repeat_enabled
                             print(f"eval_anti_repeat_x5={'on' if self.eval_anti_repeat_enabled else 'off'}")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 INVERSE_ACTION_PENALTY = 20.0
 REPEAT_FOUR_PENALTY = 100.0
-TIMEOUT_PENALTY = 100.0
+TIMEOUT_PENALTY = 100.0   # synced with torch_env_sparse.TIMEOUT_PENALTY
 STEP_REWARD = -1.0
 
 

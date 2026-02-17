@@ -1,177 +1,98 @@
-"""REINFORCE training entrypoint."""
+"""PyTorch REINFORCE trainer with batched torch environment (GPU-first)."""
 
 from __future__ import annotations
 
 import argparse
-from collections import deque
-from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
+from pathlib import Path
 
-import numpy as np
+import torch
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .checkpoint import CheckpointManager
-from .client import RubikAPIClient
 from .policy import LinearSoftmaxPolicy
-from .reward import TIMEOUT_PENALTY, compute_step_reward
-from .types import Transition
-from rubik_sim.engine import RubikEngine
-from rubik_sim.state_codec import encode_one_hot
-
-
-def _sample_scramble_steps(rng: np.random.Generator, scramble_steps_max: int) -> int:
-    return int(rng.integers(1, scramble_steps_max + 1))
-
-
-def _discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
-    returns = np.zeros_like(rewards, dtype=np.float64)
-    running = 0.0
-    for i in range(len(rewards) - 1, -1, -1):
-        running = float(rewards[i]) + gamma * running
-        returns[i] = running
-    return returns
-
-
-def _worker_episode_gradients(task: dict) -> dict:
-    """Run one full episode in a separate process and return accumulated gradients."""
-    W1 = task["W1"]
-    b1 = task["b1"]
-    W2 = task["W2"]
-    b2 = task["b2"]
-    seed = int(task["seed"])
-    scramble_steps_max = int(task["scramble_steps_max"])
-    max_episode_steps = int(task["max_episode_steps"])
-    gamma = float(task["gamma"])
-    policy = LinearSoftmaxPolicy(W1=W1, b1=b1, W2=W2, b2=b2, seed=seed)
-    rng = np.random.default_rng(seed)
-
-    env = RubikEngine(cube_size=2)
-    env.reset()
-    scramble_steps = _sample_scramble_steps(rng, scramble_steps_max)
-    env.scramble(steps=scramble_steps, seed=seed + 17)
-
-    traj: list[Transition] = []
-    solved = False
-    action_history: list[int] = []
-
-    for _ in range(max_episode_steps):
-        state_oh = encode_one_hot(env.get_state()).astype(np.float64)
-        hist_oh = policy.history_one_hot(action_history)
-        probs = policy.action_probs(state_oh, hist_oh)
-        action = int(rng.choice(12, p=probs))
-        reward = compute_step_reward(action_history, action)
-        env.step(action)
-        solved = env.is_solved()
-        traj.append(
-            Transition(
-                state_one_hot=state_oh,
-                action_history_one_hot=hist_oh.copy(),
-                action=action,
-                reward=reward,
-            )
-        )
-        action_history = (action_history + [action])[-4:]
-        if solved:
-            break
-
-    if (not solved) and len(traj) > 0:
-        traj[-1].reward -= TIMEOUT_PENALTY
-
-    rewards = np.asarray([t.reward for t in traj], dtype=np.float64)
-    returns = _discounted_returns(rewards, gamma)
-    advantages = returns
-
-    dW1_acc = np.zeros_like(policy.W1)
-    db1_acc = np.zeros_like(policy.b1)
-    dW2_acc = np.zeros_like(policy.W2)
-    db2_acc = np.zeros_like(policy.b2)
-    adv_values: list[float] = []
-    v_values: list[float] = []
-
-    for t, advantage in zip(traj, advantages):
-        advantage = float(advantage)
-        adv_values.append(advantage)
-        v_values.append(0.0)
-        dW1, db1, dW2, db2 = policy.log_policy_gradients(
-            state_one_hot=t.state_one_hot,
-            action_history_one_hot=t.action_history_one_hot,
-            action=t.action,
-        )
-        dW1_acc += advantage * dW1
-        db1_acc += advantage * db1
-        dW2_acc += advantage * dW2
-        db2_acc += advantage * db2
-
-    return {
-        "dW1": dW1_acc,
-        "db1": db1_acc,
-        "dW2": dW2_acc,
-        "db2": db2_acc,
-        "solved": bool(solved),
-        "steps": int(len(traj)),
-        "return": float(np.sum(rewards)),
-        "adv_mean": float(np.mean(adv_values)) if adv_values else 0.0,
-        "v_mean": float(np.mean(v_values)) if v_values else 0.0,
-    }
+from .reward import TIMEOUT_PENALTY
+from .torch_env import TorchRubikBatchEnv
 
 
 class ReinforceTrainer:
+    CURRICULUM_THRESHOLD = 0.80
+    CURRICULUM_MAX_SCRAMBLE = 10
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self._episode_bar: tqdm | None = None
         if args.scramble_steps < 1:
             raise ValueError("--scramble-steps must be >= 1")
+        if args.num_envs < 1:
+            raise ValueError("--num-envs must be >= 1")
 
-        self.external_client: RubikAPIClient | None = None
-        if args.external_server:
-            if args.num_envs != 1:
-                raise ValueError("--external-server supports only --num-envs 1")
-            self.external_client = RubikAPIClient(host=args.host, port=args.port)
-            self._targets = [f"{args.host}:{args.port}"]
-        else:
-            self._targets = [f"local_proc_env_{i}" for i in range(args.num_envs)]
+        if args.seed is not None:
+            torch.manual_seed(args.seed)
 
+        self.device = self._resolve_device(args.device)
         self.ckpt = CheckpointManager(args.checkpoint_dir)
-
-        loaded_policy, start_ep = self.ckpt.load_latest()
-        if loaded_policy is None:
-            self.policy = LinearSoftmaxPolicy(seed=args.seed)
-            self.start_episode = 0
+        self.policy, self.start_episode = self._load_or_init_policy()
+        self.policy.to(self.device)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=args.lr)
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.exp_name = getattr(args, "exp_name", None)
+        if self.exp_name:
+            self.tb_logdir = str(Path(args.tensorboard_logdir) / self.exp_name / f"run_{self.run_timestamp}")
         else:
-            self.policy = loaded_policy
-            self.start_episode = start_ep
+            self.tb_logdir = str(Path(args.tensorboard_logdir) / f"run_{self.run_timestamp}")
+        self.tb_writer = SummaryWriter(log_dir=self.tb_logdir)
+        if self.exp_name:
+            self.tb_writer.add_text("meta/exp_name", self.exp_name, 0)
+        self._episode_bar: tqdm | None = None
+        self._rng = torch.Generator(device=self.device)
+        if args.seed is not None:
+            self._rng.manual_seed(args.seed)
 
-        self.env_rngs = [np.random.default_rng(None if args.seed is None else args.seed + i + 1) for i in range(args.num_envs)]
-
-        self._recent_solved = deque(maxlen=args.stats_window)
-        self._recent_steps = deque(maxlen=args.stats_window)
-        self._recent_returns = deque(maxlen=args.stats_window)
-        self._solved_total = 0
-        self._episodes_done = 0
-        self._last_adv_mean = 0.0
-        self._last_v_mean = 0.0
-        self._log_solved_sum = 0
-        self._log_steps_sum = 0.0
-        self._log_return_sum = 0.0
-        self._log_adv_sum = 0.0
-        self._log_v_sum = 0.0
-        self._log_count = 0
+        self.env = TorchRubikBatchEnv(batch_size=args.num_envs, device=self.device)
+        if not getattr(args, "torch_env", True):
+            self._log("warning: --no-torch-env is ignored; trainer uses torch env by design")
+        self.current_scramble_steps = min(int(args.scramble_steps), self.CURRICULUM_MAX_SCRAMBLE)
+        if args.scramble_steps > self.CURRICULUM_MAX_SCRAMBLE:
+            self._log(
+                f"warning: --scramble-steps={args.scramble_steps} exceeds max curriculum level "
+                f"{self.CURRICULUM_MAX_SCRAMBLE}; clamped to {self.current_scramble_steps}"
+            )
 
         self._log(
             "trainer_init "
-            f"targets={self._targets} episodes={args.episodes} num_envs={args.num_envs} "
-            f"scramble_steps_max={args.scramble_steps} max_episode_steps={args.max_episode_steps} "
-            f"gamma={args.gamma} lr={args.lr} baseline=discounted_returns "
-            f"checkpoint_dir={args.checkpoint_dir}"
+            f"episodes={args.episodes} num_envs={args.num_envs} "
+            f"scramble_steps_start={self.current_scramble_steps} scramble_steps_max={self.CURRICULUM_MAX_SCRAMBLE} "
+            f"curriculum_threshold={self.CURRICULUM_THRESHOLD:.2f} max_episode_steps={args.max_episode_steps} "
+            f"gamma={args.gamma} lr={args.lr} optimizer=adam baseline=none "
+            f"device={self.device.type} tensorboard_logdir={self.tb_logdir} "
+            f"checkpoint_dir={args.checkpoint_dir} exp_name={self.exp_name or 'run_default'}"
         )
-        self._log(
-            f"simulator_mode external_server={args.external_server} "
-            f"backend={'process_pool' if not args.external_server else 'external_http'}"
-        )
-        if loaded_policy is None:
+        if self.start_episode == 0:
             self._log("checkpoint_status no checkpoint found, initialized random policy")
         else:
             self._log(f"checkpoint_status resumed from episode={self.start_episode}")
+
+    def _load_or_init_policy(self) -> tuple[LinearSoftmaxPolicy, int]:
+        loaded, episode = self.ckpt.load_latest()
+        if loaded is None:
+            return LinearSoftmaxPolicy(seed=self.args.seed), 0
+        return loaded, episode
+
+    @staticmethod
+    def _resolve_device(device_name: str) -> torch.device:
+        name = device_name.lower()
+        if name == "cpu":
+            return torch.device("cpu")
+        if name == "cuda":
+            if not torch.cuda.is_available():
+                raise ValueError("Requested --device cuda, but CUDA is not available")
+            return torch.device("cuda")
+        if name == "mps":
+            if not (torch.backends.mps.is_available() and torch.backends.mps.is_built()):
+                raise ValueError("Requested --device mps, but MPS is not available")
+            return torch.device("mps")
+        raise ValueError("--device must be one of: cpu, cuda, mps")
 
     def _log(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -181,144 +102,82 @@ class ReinforceTrainer:
         else:
             print(text, flush=True)
 
-    def _record_episode_metrics(
-        self,
-        solved: bool,
-        steps: int,
-        total_return: float,
-        adv_mean: float,
-        v_mean: float,
-    ) -> None:
-        self._episodes_done += 1
-        self._solved_total += int(solved)
-        self._recent_solved.append(1 if solved else 0)
-        self._recent_steps.append(steps)
-        self._recent_returns.append(total_return)
+    def _rollout_batch(self) -> dict[str, torch.Tensor]:
+        B = self.args.num_envs
+        T = self.args.max_episode_steps
+        gamma = float(self.args.gamma)
 
-        self._log_count += 1
-        self._log_solved_sum += int(solved)
-        self._log_steps_sum += float(steps)
-        self._log_return_sum += float(total_return)
-        self._log_adv_sum += float(adv_mean)
-        self._log_v_sum += float(v_mean)
+        self.env.reset(B)
+        scramble_used = int(self.current_scramble_steps)
+        self.env.scramble(scramble_used, generator=self._rng)
 
-    def _maybe_log_interval_stats(self, global_episode: int) -> None:
-        if self.args.log_interval <= 0:
-            return
-        if global_episode % self.args.log_interval != 0:
-            return
-        if self._log_count == 0:
-            return
+        rewards_total = torch.zeros((T, B), dtype=torch.float32, device=self.device)
+        rewards_step = torch.zeros((T, B), dtype=torch.float32, device=self.device)
+        rewards_inverse = torch.zeros((T, B), dtype=torch.float32, device=self.device)
+        rewards_repeat = torch.zeros((T, B), dtype=torch.float32, device=self.device)
+        active_mask = torch.zeros((T, B), dtype=torch.float32, device=self.device)
+        log_probs = torch.zeros((T, B), dtype=torch.float32, device=self.device)
 
-        recent_n = len(self._recent_solved)
-        solve_rate_recent = (sum(self._recent_solved) / recent_n) if recent_n else 0.0
-        avg_steps_recent = (sum(self._recent_steps) / recent_n) if recent_n else 0.0
-        avg_return_recent = (sum(self._recent_returns) / recent_n) if recent_n else 0.0
-        solve_rate_total = self._solved_total / self._episodes_done if self._episodes_done else 0.0
+        for t in range(T):
+            obs = self.env.build_observation()  # [B,192]
+            logits = self.policy.forward_logits(obs)  # [B,12]
+            actions, lp = LinearSoftmaxPolicy.sample_actions_from_logits(logits)
 
-        solve_rate_interval = self._log_solved_sum / self._log_count
-        avg_steps_interval = self._log_steps_sum / self._log_count
-        avg_return_interval = self._log_return_sum / self._log_count
-        avg_adv_interval = self._log_adv_sum / self._log_count
-        avg_v_interval = self._log_v_sum / self._log_count
+            step_out = self.env.step(actions)
+            rewards_total[t] = step_out["reward_total"]
+            rewards_step[t] = step_out["reward_step"]
+            rewards_inverse[t] = step_out["reward_inverse"]
+            rewards_repeat[t] = step_out["reward_repeat"]
+            active_mask[t] = step_out["active"].to(torch.float32)
+            log_probs[t] = lp
 
-        self._log(
-            "episode_stats "
-            f"episode={global_episode} interval_episodes={self._log_count} "
-            f"solve_rate_interval={solve_rate_interval:.3f} "
-            f"avg_steps_interval={avg_steps_interval:.2f} "
-            f"avg_return_interval={avg_return_interval:.2f} "
-            f"adv_mean_interval={avg_adv_interval:.2f} "
-            f"v_mean_interval={avg_v_interval:.2f} "
-            f"solve_rate_recent={solve_rate_recent:.3f} "
-            f"avg_steps_recent={avg_steps_recent:.2f} "
-            f"avg_return_recent={avg_return_recent:.2f} "
-            f"solve_rate_total={solve_rate_total:.3f}"
-        )
+        # Timeout penalty: add -100 to last valid step for unsolved episodes.
+        timeout_penalty_per_env = torch.zeros((B,), dtype=torch.float32, device=self.device)
+        unsolved = ~self.env.done
+        has_steps = self.env.steps > 0
+        apply_to = unsolved & has_steps
+        if apply_to.any():
+            idx = torch.nonzero(apply_to, as_tuple=False).squeeze(1)
+            t_idx = self.env.steps[idx] - 1
+            rewards_total[t_idx, idx] += -float(TIMEOUT_PENALTY)
+            timeout_penalty_per_env[idx] = -float(TIMEOUT_PENALTY)
 
-        self._log_solved_sum = 0
-        self._log_steps_sum = 0.0
-        self._log_return_sum = 0.0
-        self._log_adv_sum = 0.0
-        self._log_v_sum = 0.0
-        self._log_count = 0
+        # Discounted returns per env over time.
+        returns = torch.zeros_like(rewards_total)
+        running = torch.zeros((B,), dtype=torch.float32, device=self.device)
+        for t in range(T - 1, -1, -1):
+            running = rewards_total[t] + gamma * running
+            returns[t] = running
 
-    def _should_update_progress_postfix(self, global_episode: int, total_to_run: int, episodes_done_local: int) -> bool:
-        if episodes_done_local >= total_to_run:
-            return True
-        if self.args.log_interval <= 0:
-            return False
-        return (global_episode % self.args.log_interval) == 0
+        valid_count = torch.clamp(active_mask.sum(), min=1.0)
+        loss = -((log_probs * returns * active_mask).sum() / valid_count)
 
-    def _collect_episode_external(self, client: RubikAPIClient, rng: np.random.Generator) -> tuple[list[Transition], bool, int, float]:
-        client.reset()
-        scramble_steps = _sample_scramble_steps(rng, self.args.scramble_steps)
-        client.scramble(steps=scramble_steps)
+        episode_return = rewards_total.sum(dim=0)  # [B]
+        episode_steps = self.env.steps.to(torch.float32)  # [B]
+        solved = self.env.done.to(torch.float32)  # [B]
+        solved_steps = episode_steps[self.env.done]
 
-        traj: list[Transition] = []
-        solved = False
-        action_history: list[int] = []
-
-        for _ in range(self.args.max_episode_steps):
-            state_oh = client.get_state()
-            hist_oh = self.policy.history_one_hot(action_history)
-            probs = self.policy.action_probs(state_oh, hist_oh)
-            action = int(rng.choice(12, p=probs))
-            out = client.step(action)
-            solved = bool(out["solved"])
-            reward = compute_step_reward(action_history, action)
-            traj.append(
-                Transition(
-                    state_one_hot=state_oh,
-                    action_history_one_hot=hist_oh.copy(),
-                    action=action,
-                    reward=reward,
-                )
-            )
-            action_history = (action_history + [action])[-4:]
-            if solved:
-                break
-
-        if (not solved) and len(traj) > 0:
-            traj[-1].reward -= TIMEOUT_PENALTY
-
-        total_return = float(sum(t.reward for t in traj))
-        return traj, solved, len(traj), total_return
-
-    def _episode_gradients(self, traj: list[Transition]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        rewards = np.asarray([t.reward for t in traj], dtype=np.float64)
-        returns = _discounted_returns(rewards, self.args.gamma)
-        advantages = returns
-
-        dW1_acc = np.zeros_like(self.policy.W1)
-        db1_acc = np.zeros_like(self.policy.b1)
-        dW2_acc = np.zeros_like(self.policy.W2)
-        db2_acc = np.zeros_like(self.policy.b2)
-        adv_values: list[float] = []
-        v_values: list[float] = []
-
-        for t, advantage in zip(traj, advantages):
-            advantage = float(advantage)
-            adv_values.append(advantage)
-            v_values.append(0.0)
-            dW1, db1, dW2, db2 = self.policy.log_policy_gradients(
-                state_one_hot=t.state_one_hot,
-                action_history_one_hot=t.action_history_one_hot,
-                action=t.action,
-            )
-            dW1_acc += advantage * dW1
-            db1_acc += advantage * db1
-            dW2_acc += advantage * dW2
-            db2_acc += advantage * db2
-
-        self._last_adv_mean = float(np.mean(adv_values)) if adv_values else 0.0
-        self._last_v_mean = float(np.mean(v_values)) if v_values else 0.0
-        return dW1_acc, db1_acc, dW2_acc, db2_acc
+        return {
+            "loss": loss,
+            "sr": solved.mean(),
+            "steps_mean": episode_steps.mean(),
+            "steps_to_solve_mean": solved_steps.mean() if solved_steps.numel() else torch.tensor(0.0, device=self.device),
+            "return_mean": episode_return.mean(),
+            "return_step_mean": rewards_step.sum(dim=0).mean(),
+            "return_inverse_mean": rewards_inverse.sum(dim=0).mean(),
+            "return_repeat_mean": rewards_repeat.sum(dim=0).mean(),
+            "return_timeout_mean": timeout_penalty_per_env.mean(),
+            "last_steps": self.env.steps[-1].item(),
+            "last_solved": bool(self.env.done[-1].item()),
+            "last_return": float(episode_return[-1].item()),
+            "scramble_steps": scramble_used,
+        }
 
     def run(self) -> None:
-        total_to_run = self.args.episodes
-        episodes_done_local = 0
-        global_episode = self.start_episode
+        total_to_run = int(self.args.episodes)
+        episodes_done = 0
+        global_episode = int(self.start_episode)
+        global_batch = 0
 
         try:
             self._episode_bar = tqdm(
@@ -329,148 +188,117 @@ class ReinforceTrainer:
                 maxinterval=5.0,
             )
 
-            if self.args.external_server:
-                assert self.external_client is not None
-                while episodes_done_local < total_to_run:
-                    traj, solved, steps, total_return = self._collect_episode_external(
-                        self.external_client,
-                        self.env_rngs[0],
+            while episodes_done < total_to_run:
+                metrics = self._rollout_batch()
+                batch_size = min(self.args.num_envs, total_to_run - episodes_done)
+                loss = metrics["loss"]
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                global_batch += 1
+                global_episode += batch_size
+                episodes_done += batch_size
+
+                sr = float(metrics["sr"].item())
+                steps_mean = float(metrics["steps_mean"].item())
+                steps_to_solve_mean = float(metrics["steps_to_solve_mean"].item())
+                return_mean = float(metrics["return_mean"].item())
+                ret_step = float(metrics["return_step_mean"].item())
+                ret_inv = float(metrics["return_inverse_mean"].item())
+                ret_rep = float(metrics["return_repeat_mean"].item())
+                ret_timeout = float(metrics["return_timeout_mean"].item())
+                loss_value = float(loss.detach().item())
+
+                self.tb_writer.add_scalar("train/sr_batch", sr, global_batch)
+                self.tb_writer.add_scalar("train/steps_mean_batch", steps_mean, global_batch)
+                self.tb_writer.add_scalar("train/steps_to_solve_mean_batch", steps_to_solve_mean, global_batch)
+                self.tb_writer.add_scalar("train/return_total_mean_batch", return_mean, global_batch)
+                self.tb_writer.add_scalar("train/return_step_mean_batch", ret_step, global_batch)
+                self.tb_writer.add_scalar("train/return_inverse_penalty_mean_batch", ret_inv, global_batch)
+                self.tb_writer.add_scalar("train/return_repeat_penalty_mean_batch", ret_rep, global_batch)
+                self.tb_writer.add_scalar("train/return_timeout_penalty_mean_batch", ret_timeout, global_batch)
+                self.tb_writer.add_scalar("train/loss_batch", loss_value, global_batch)
+                self.tb_writer.add_scalar("train/lr", float(self.args.lr), global_batch)
+                self.tb_writer.add_scalar("train/scramble_steps_current", int(metrics["scramble_steps"]), global_batch)
+
+                if self.args.log_interval > 0 and global_episode % self.args.log_interval == 0:
+                    self._log(
+                        "batch_stats "
+                        f"episode={global_episode} batch={global_batch} "
+                        f"scramble_steps={int(metrics['scramble_steps'])} "
+                        f"sr={sr:.3f} steps_mean={steps_mean:.2f} steps_to_solve_mean={steps_to_solve_mean:.2f} "
+                        f"return_mean={return_mean:.2f} ret_step={ret_step:.2f} ret_inverse={ret_inv:.2f} "
+                        f"ret_repeat={ret_rep:.2f} ret_timeout={ret_timeout:.2f} loss={loss_value:.4f}"
                     )
-                    dW1, db1, dW2, db2 = self._episode_gradients(traj)
-                    self.policy.apply_gradients(dW1, db1, dW2, db2, lr=self.args.lr)
 
-                    global_episode += 1
-                    episodes_done_local += 1
-                    self._record_episode_metrics(
-                        solved=solved,
-                        steps=steps,
-                        total_return=total_return,
-                        adv_mean=self._last_adv_mean,
-                        v_mean=self._last_v_mean,
+                if sr > self.CURRICULUM_THRESHOLD and self.current_scramble_steps < self.CURRICULUM_MAX_SCRAMBLE:
+                    prev_scramble = self.current_scramble_steps
+                    self.current_scramble_steps += 1
+                    self._log(
+                        "curriculum_update "
+                        f"episode={global_episode} batch={global_batch} sr={sr:.3f} "
+                        f"scramble_steps {prev_scramble}->{self.current_scramble_steps}"
                     )
 
-                    self._episode_bar.update(1)
-                    if self._should_update_progress_postfix(global_episode, total_to_run, episodes_done_local):
-                        self._episode_bar.set_postfix({"steps": steps, "solved": solved, "ret": f"{total_return:.1f}"})
-                    self._maybe_log_interval_stats(global_episode)
+                self._episode_bar.update(batch_size)
+                self._episode_bar.set_postfix(
+                    {
+                        "scr": int(metrics["scramble_steps"]),
+                        "steps": int(metrics["last_steps"]),
+                        "solved": bool(metrics["last_solved"]),
+                        "ret": f"{metrics['last_return']:.1f}",
+                        "sr": f"{sr:.2f}",
+                        "loss": f"{loss_value:.3f}",
+                    }
+                )
 
-                    if global_episode % self.args.save_every == 0:
-                        metadata = {
-                            "episode": global_episode,
-                            "lr": self.args.lr,
-                            "gamma": self.args.gamma,
-                            "num_envs": self.args.num_envs,
-                            "scramble_steps": self.args.scramble_steps,
-                            "baseline": "discounted_returns",
-                        }
-                        path = self.ckpt.save(self.policy, episode=global_episode, metadata=metadata)
-                        self._log(f"checkpoint_saved episode={global_episode} path={path}")
-
-            else:
-                with ProcessPoolExecutor(max_workers=self.args.num_envs) as pool:
-                    while episodes_done_local < total_to_run:
-                        batch_size = min(self.args.num_envs, total_to_run - episodes_done_local)
-                        tasks = []
-                        for _ in range(batch_size):
-                            seed = int(self.env_rngs[0].integers(0, 2**31 - 1))
-                            tasks.append(
-                                {
-                                    "W1": self.policy.W1,
-                                    "b1": self.policy.b1,
-                                    "W2": self.policy.W2,
-                                    "b2": self.policy.b2,
-                                    "seed": seed,
-                                    "scramble_steps_max": self.args.scramble_steps,
-                                    "max_episode_steps": self.args.max_episode_steps,
-                                    "gamma": self.args.gamma,
-                                }
-                            )
-
-                        batch_results = list(pool.map(_worker_episode_gradients, tasks))
-
-                        batch_dW1 = np.zeros_like(self.policy.W1)
-                        batch_db1 = np.zeros_like(self.policy.b1)
-                        batch_dW2 = np.zeros_like(self.policy.W2)
-                        batch_db2 = np.zeros_like(self.policy.b2)
-                        save_marks: list[int] = []
-
-                        for res in batch_results:
-                            batch_dW1 += res["dW1"]
-                            batch_db1 += res["db1"]
-                            batch_dW2 += res["dW2"]
-                            batch_db2 += res["db2"]
-
-                            solved = bool(res["solved"])
-                            steps = int(res["steps"])
-                            total_return = float(res["return"])
-                            adv_mean = float(res.get("adv_mean", 0.0))
-                            v_mean = float(res.get("v_mean", 0.0))
-
-                            global_episode += 1
-                            episodes_done_local += 1
-                            self._record_episode_metrics(
-                                solved=solved,
-                                steps=steps,
-                                total_return=total_return,
-                                adv_mean=adv_mean,
-                                v_mean=v_mean,
-                            )
-                            self._maybe_log_interval_stats(global_episode)
-
-                            if global_episode % self.args.save_every == 0:
-                                save_marks.append(global_episode)
-
-                        batch_dW1 /= batch_size
-                        batch_db1 /= batch_size
-                        batch_dW2 /= batch_size
-                        batch_db2 /= batch_size
-                        self.policy.apply_gradients(batch_dW1, batch_db1, batch_dW2, batch_db2, lr=self.args.lr)
-
-                        self._episode_bar.update(batch_size)
-                        if batch_results and self._should_update_progress_postfix(
-                            global_episode,
-                            total_to_run,
-                            episodes_done_local,
-                        ):
-                            solved_last = bool(batch_results[-1]["solved"])
-                            steps_last = int(batch_results[-1]["steps"])
-                            ret_last = float(batch_results[-1]["return"])
-                            self._episode_bar.set_postfix({"steps": steps_last, "solved": solved_last, "ret": f"{ret_last:.1f}"})
-
-                        for ep in save_marks:
-                            metadata = {
-                                "episode": ep,
-                                "lr": self.args.lr,
-                                "gamma": self.args.gamma,
-                                "num_envs": self.args.num_envs,
-                                "scramble_steps": self.args.scramble_steps,
-                                "baseline": "discounted_returns",
-                            }
-                            path = self.ckpt.save(self.policy, episode=ep, metadata=metadata)
-                            self._log(f"checkpoint_saved episode={ep} path={path}")
+                if global_episode % self.args.save_every == 0:
+                    metadata = {
+                        "episode": global_episode,
+                        "lr": self.args.lr,
+                        "gamma": self.args.gamma,
+                        "num_envs": self.args.num_envs,
+                        "scramble_steps": self.current_scramble_steps,
+                        "curriculum_threshold": self.CURRICULUM_THRESHOLD,
+                        "curriculum_max_scramble": self.CURRICULUM_MAX_SCRAMBLE,
+                        "baseline": "discounted_returns",
+                        "torch_env": True,
+                        "device": self.device.type,
+                    }
+                    path = self.ckpt.save(self.policy, episode=global_episode, optimizer=self.optimizer, metadata=metadata)
+                    self._log(f"checkpoint_saved episode={global_episode} path={path}")
 
         finally:
+            self.tb_writer.flush()
+            self.tb_writer.close()
             if self._episode_bar is not None:
                 self._episode_bar.close()
                 self._episode_bar = None
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Train REINFORCE policy for Rubik 2x2")
-    p.add_argument("--host", default="127.0.0.1", help="Used only with --external-server")
-    p.add_argument("--port", type=int, default=8000, help="Used only with --external-server")
-    p.add_argument("--external-server", action="store_true", help="Use already running simulator server")
-    p.add_argument("--num-envs", type=int, default=1, help="Number of parallel simulators for batch episodes")
+    p = argparse.ArgumentParser(description="Train REINFORCE policy for Rubik 2x2 (PyTorch batched torch-env mode)")
+    p.add_argument("--num-envs", type=int, default=1, help="Batch size of parallel environments")
     p.add_argument("--episodes", type=int, required=True)
     p.add_argument("--max-episode-steps", type=int, default=200)
-    p.add_argument("--scramble-steps", type=int, required=True)
+    p.add_argument(
+        "--scramble-steps",
+        type=int,
+        required=True,
+        help="Initial scramble depth. Curriculum increases by +1 when batch SR > 0.8, up to 10.",
+    )
     p.add_argument("--gamma", type=float, default=1.0)
-    p.add_argument("--lr", type=float, default=0.01)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "mps"])
+    p.add_argument("--tensorboard-logdir", default="runs/cube_reinforcer")
+    p.add_argument("--exp-name", type=str, default=None, help="Optional experiment name for TensorBoard log grouping")
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--checkpoint-dir", default="checkpoints")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--log-interval", type=int, default=20)
-    p.add_argument("--stats-window", type=int, default=100)
+    p.add_argument("--torch-env", action=argparse.BooleanOptionalAction, default=True, help="Use batched torch env backend")
     return p
 
 

@@ -1,8 +1,6 @@
 # Cube-Reinforcer
 
-----
-
-`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a NumPy-only REINFORCE pipeline.
+`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik's Cube** with a custom simulator and a PyTorch REINFORCE pipeline.
 
 The repository combines:
 - a mathematically correct 2x2 cube engine with 12 discrete actions,
@@ -19,7 +17,7 @@ The repository combines:
 5. [Installation](#installation)
 6. [Running Tests](#running-tests)
 7. [Simulator](#simulator)
-8. [Training (REINFORCE, NumPy)](#training-reinforce-numpy)
+8. [Training (REINFORCE, PyTorch)](#training-reinforce-pytorch)
 9. [Evaluation](#evaluation)
 10. [Experiments](#experiments)
 11. [Current Limits and Notes](#current-limits-and-notes)
@@ -31,7 +29,7 @@ The project is focused on RL for a compact but non-trivial combinatorial domain:
 - **Environment**: true 2x2 Rubik cube dynamics.
 - **Action space**: 12 actions (`U/D/L/R/F/B` with `+/-` quarter-turns).
 - **State**: one-hot stickers (`24 x 6`), with additional one-hot history of the last 4 actions.
-- **Policy**: two-layer network implemented manually in NumPy.
+- **Policy**: two-layer neural network implemented in PyTorch.
 - **Algorithm**: REINFORCE with discounted returns (no learned value network).
 
 Main goals:
@@ -119,7 +117,7 @@ The tests cover:
 - engine move correctness and inverse properties,
 - solved-check logic (including global orientation invariance),
 - API behavior,
-- policy gradient math (finite-difference check),
+- policy gradient math / autograd sanity checks,
 - checkpoint save/load,
 - train/infer smoke integration.
 
@@ -250,7 +248,7 @@ uv run python -m rubik_sim.cli gui --state-file ./state.json
 
 ---
 
-## Training (REINFORCE, NumPy)
+## Training (REINFORCE, PyTorch)
 ### Algorithm and Notation
 Notation follows standard REINFORCE lecture style:
 - trajectory: $\tau = (s_0,a_0,r_1,\dots,s_T)$
@@ -275,39 +273,35 @@ Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
   $$
-  h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
+  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
   $$
-- activation:
+- first activation:
   $$
-  h = \text{ELU}(h_{\text{pre}})
+  h^{(1)} = \text{ELU}(h^{(1)}_{\text{pre}})
+  $$
+- second affine layer:
+  $$
+  h^{(2)}_{\text{pre}} = h^{(1)}W_2 + b_2,\quad W_2\in\mathbb{R}^{512\times 128}
+  $$
+- second activation:
+  $$
+  h^{(2)} = \text{ELU}(h^{(2)}_{\text{pre}})
   $$
 - output affine layer:
   $$
-  z = hW_2 + b_2,\quad W_2\in\mathbb{R}^{128\times 12}
+  z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
   $$
 - action probabilities:
   $$
   \pi = \text{softmax}(z)
   $$
 
-### Manual Gradient Derivation (Implemented)
-For sampled action $a$ and one-hot $e_a$:
+### Optimization
+Training uses standard PyTorch autograd with Adam optimizer:
 $$
-\delta = \frac{\partial \log \pi_\theta(a\mid s)}{\partial z} = e_a - \pi
+\mathcal{L}(\theta) = -\frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
 $$
-Then:
-$$
-\frac{\partial \log \pi}{\partial W_2} = h^\top \delta,\qquad
-\frac{\partial \log \pi}{\partial b_2} = \delta
-$$
-$$
-g_h = W_2\delta,\qquad
-g_{\text{pre}} = g_h \odot \text{ELU}'(h_{\text{pre}})
-$$
-$$
-\frac{\partial \log \pi}{\partial W_1} = x^\top g_{\text{pre}},\qquad
-\frac{\partial \log \pi}{\partial b_1} = g_{\text{pre}}
-$$
+where $B=\texttt{--num-envs}$ is the number of episodes collected per update step.
 
 Batch update (average over parallel environments):
 $$
@@ -329,7 +323,7 @@ uv run python -m rubik_rl.trainer [args]
 Main arguments:
 - `--episodes` (required)
 - `--num-envs` (parallel env count)
-- `--scramble-steps` (maximum scramble depth; per episode sampled uniformly from `1..max`)
+- `--scramble-steps` (initial fixed scramble depth for curriculum)
 - `--max-episode-steps`
 - `--gamma`
 - `--lr`
@@ -337,20 +331,36 @@ Main arguments:
 - `--checkpoint-dir`
 - `--seed`
 - `--log-interval`
-- `--stats-window`
+- `--device` (`cpu`, `cuda`, `mps`)
+- `--tensorboard-logdir` (base directory; each run creates `run_YYYYMMDD_HHMMSS`)
+- `--exp-name` (optional experiment name; if set logs go to `<tensorboard-logdir>/<exp-name>/run_YYYYMMDD_HHMMSS` and name is written to TensorBoard)
+- `--torch-env` / `--no-torch-env` (torch-env backend flag; currently torch-env is the intended training backend)
+
+Training mode:
+- **No servers are started during training.**
+- The trainer runs batched cube logic in `TorchRubikBatchEnv` directly on the selected device for speed.
 
 Important training details:
-- **Scramble sampling rule**: for each episode, scramble depth is sampled as
-  $$
-  s \sim \mathcal{U}\{1,\dots,S_{\max}\},\quad S_{\max}=\texttt{--scramble-steps}
-  $$
-  so `--scramble-steps` is an upper bound, not a fixed depth.
+- **Scramble curriculum**:
+  - each episode uses a **fixed** scramble depth equal to current curriculum level;
+  - starts from `--scramble-steps`;
+  - when batch solve-rate `SR > 0.8`, curriculum increases by `+1`;
+  - maximum curriculum level is `10`.
 - **Batch-size / learning-rate behavior**: gradients are **averaged** across parallel environments, not summed:
   $$
   g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
   \theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
   $$
   therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
+- **Batch-level logging (no windows)**:
+  TensorBoard and console metrics are computed from the **current batch only** (`B = --num-envs` episodes),
+  including:
+  - solve rate (`SR`)
+  - current scramble depth (`scramble_steps_current`)
+  - mean steps
+  - mean steps to solve
+  - mean total return
+  - mean return from each reward component (`step`, `inverse_penalty`, `repeat_penalty`, `timeout_penalty`)
 
 ### Sparse training (7-bit state, 6 actions, plane reward)
 Separate script: reduced state (cells a..g), 6 actions (angle H fixed), vectorized reward by planes.
@@ -362,7 +372,7 @@ Checkpoints go to `checkpoints_sparse/`. In the GUI, use the **Eval Sparse** but
 
 Examples (full trainer):
 ```bash
-# Fast local parallel training (internal process pool envs)
+# Fast local training (local cube engines, no HTTP)
 uv run python -m rubik_rl.trainer \
   --num-envs 16 \
   --episodes 200000 \
@@ -370,19 +380,12 @@ uv run python -m rubik_rl.trainer \
   --max-episode-steps 40 \
   --gamma 0.95 \
   --lr 1e-4 \
+  --device cuda \
+  --exp-name baseline_scr3 \
+  --tensorboard-logdir runs/cube_reinforcer \
   --save-every 5000 \
   --checkpoint-dir checkpoints \
-  --log-interval 1000 \
-  --stats-window 5000
-
-# Train against already running external server (single env only)
-uv run python -m rubik_rl.trainer \
-  --external-server \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --num-envs 1 \
-  --episodes 50000 \
-  --scramble-steps 4
+  --log-interval 1000
 ```
 
 ---

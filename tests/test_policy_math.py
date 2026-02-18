@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+import torch
 
 from rubik_rl.policy import LinearSoftmaxPolicy
 
@@ -12,66 +13,25 @@ class TestPolicyMath(unittest.TestCase):
         state[np.arange(24), np.arange(24) % 6] = 1.0
         hist = np.zeros((48,), dtype=np.float64)
         probs = p.action_probs(state, hist)
-        self.assertAlmostEqual(float(np.sum(probs)), 1.0, places=8)
+        self.assertAlmostEqual(float(np.sum(probs)), 1.0, places=6)
         self.assertTrue(np.all(probs >= 0.0))
 
-    def test_manual_gradient_matches_finite_difference(self):
+    def test_autograd_gradient_exists_and_finite(self):
         policy = LinearSoftmaxPolicy(seed=0)
         state = np.zeros((24, 6), dtype=np.float64)
         state[np.arange(24), (np.arange(24) * 2) % 6] = 1.0
         hist = np.zeros((48,), dtype=np.float64)
         hist[3 * 12 + 4] = 1.0
-        action = 3
+        action, _, log_prob = policy.sample_action(state, hist, return_log_prob=True)
+        self.assertTrue(0 <= action < 12)
 
-        analytic_dW1, analytic_db1, analytic_dW2, analytic_db2 = policy.log_policy_gradients(state, hist, action)
+        loss = -log_prob
+        policy.zero_grad()
+        loss.backward()
 
-        eps = 1e-6
-
-        def logp() -> float:
-            probs_local = policy.action_probs(state, hist)
-            return float(np.log(probs_local[action] + 1e-15))
-
-        check_pairs_w1 = [(0, 0), (5, 4), (23, 11), (120, 2)]
-        for i, j in check_pairs_w1:
-            old = policy.W1[i, j]
-            policy.W1[i, j] = old + eps
-            f_plus = logp()
-            policy.W1[i, j] = old - eps
-            f_minus = logp()
-            policy.W1[i, j] = old
-            numeric = (f_plus - f_minus) / (2.0 * eps)
-            self.assertAlmostEqual(numeric, analytic_dW1[i, j], places=5)
-
-        for j in [0, 3, 8, 11, 64, 127]:
-            old = policy.b1[j]
-            policy.b1[j] = old + eps
-            f_plus = logp()
-            policy.b1[j] = old - eps
-            f_minus = logp()
-            policy.b1[j] = old
-            numeric = (f_plus - f_minus) / (2.0 * eps)
-            self.assertAlmostEqual(numeric, analytic_db1[j], places=5)
-
-        check_pairs_w2 = [(0, 0), (5, 4), (23, 11), (64, 2), (127, 9)]
-        for i, j in check_pairs_w2:
-            old = policy.W2[i, j]
-            policy.W2[i, j] = old + eps
-            f_plus = logp()
-            policy.W2[i, j] = old - eps
-            f_minus = logp()
-            policy.W2[i, j] = old
-            numeric = (f_plus - f_minus) / (2.0 * eps)
-            self.assertAlmostEqual(numeric, analytic_dW2[i, j], places=5)
-
-        for j in [0, 3, 8, 11]:
-            old = policy.b2[j]
-            policy.b2[j] = old + eps
-            f_plus = logp()
-            policy.b2[j] = old - eps
-            f_minus = logp()
-            policy.b2[j] = old
-            numeric = (f_plus - f_minus) / (2.0 * eps)
-            self.assertAlmostEqual(numeric, analytic_db2[j], places=5)
+        for p in policy.parameters():
+            self.assertIsNotNone(p.grad)
+            self.assertTrue(torch.isfinite(p.grad).all().item())
 
     def test_state_flatten_shape(self):
         state = np.zeros((24, 6), dtype=np.float64)
@@ -79,6 +39,17 @@ class TestPolicyMath(unittest.TestCase):
         hist = np.zeros((48,), dtype=np.float64)
         x = LinearSoftmaxPolicy.build_observation(state, hist)
         self.assertEqual(x.shape, (192,))
+
+    def test_batched_sampling_from_logits(self):
+        policy = LinearSoftmaxPolicy(seed=0)
+        x = torch.randn(16, policy.INPUT_DIM)
+        logits = policy.forward_logits(x)
+        actions, log_probs = policy.sample_actions_from_logits(logits)
+        self.assertEqual(tuple(logits.shape), (16, policy.ACTION_DIM))
+        self.assertEqual(tuple(actions.shape), (16,))
+        self.assertEqual(tuple(log_probs.shape), (16,))
+        probs = torch.softmax(logits, dim=-1)
+        self.assertTrue(torch.allclose(probs.sum(dim=-1), torch.ones(16), atol=1e-6))
 
 
 if __name__ == "__main__":

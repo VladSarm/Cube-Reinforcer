@@ -1,6 +1,6 @@
 # Cube-Reinforcer
 
-`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a NumPy-only REINFORCE pipeline.
+`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a PyTorch REINFORCE pipeline.
 
 The repository combines:
 - a mathematically correct 2x2 cube engine with 12 discrete actions,
@@ -17,7 +17,7 @@ The repository combines:
 5. [Installation](#installation)
 6. [Running Tests](#running-tests)
 7. [Simulator](#simulator)
-8. [Training (REINFORCE, NumPy)](#training-reinforce-numpy)
+8. [Training (REINFORCE, PyTorch)](#training-reinforce-pytorch)
 9. [Evaluation](#evaluation)
 10. [Experiments](#experiments)
 11. [Current Limits and Notes](#current-limits-and-notes)
@@ -29,7 +29,7 @@ The project is focused on RL for a compact but non-trivial combinatorial domain:
 - **Environment**: true 2x2 Rubik cube dynamics.
 - **Action space**: 12 actions (`U/D/L/R/F/B` with `+/-` quarter-turns).
 - **State**: one-hot stickers (`24 x 6`), with additional one-hot history of the last 4 actions.
-- **Policy**: two-layer network implemented manually in NumPy.
+- **Policy**: two-layer neural network implemented in PyTorch.
 - **Algorithm**: REINFORCE with discounted returns (no learned value network).
 
 Main goals:
@@ -114,7 +114,7 @@ The tests cover:
 - engine move correctness and inverse properties,
 - solved-check logic (including global orientation invariance),
 - API behavior,
-- policy gradient math (finite-difference check),
+- policy gradient math / autograd sanity checks,
 - checkpoint save/load,
 - train/infer smoke integration.
 
@@ -241,7 +241,7 @@ uv run python -m rubik_sim.cli gui --state-file ./state.json
 
 ---
 
-## Training (REINFORCE, NumPy)
+## Training (REINFORCE, PyTorch)
 ### Algorithm and Notation
 Notation follows standard REINFORCE lecture style. Random variables are denoted by capital letters, data points by lowercase letters.
 - $\mathbb{S}$ - state space, $s \in \mathbb{S}$ - state  
@@ -281,66 +281,36 @@ The idea is to perform gradient ascent
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
-```math
-  h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
-```
-- activation:
-  ```math
-  h = \text{ELU}(h_{\text{pre}})
-  ```
+  $$
+  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
+  $$
+- first activation:
+  $$
+  h^{(1)} = \text{ELU}(h^{(1)}_{\text{pre}})
+  $$
+- second affine layer:
+  $$
+  h^{(2)}_{\text{pre}} = h^{(1)}W_2 + b_2,\quad W_2\in\mathbb{R}^{512\times 128}
+  $$
+- second activation:
+  $$
+  h^{(2)} = \text{ELU}(h^{(2)}_{\text{pre}})
+  $$
 - output affine layer:
-  ```math
-  z = hW_2 + b_2,\quad W_2\in\mathbb{R}^{128\times 12}
-  ```
+  $$
+  z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
+  $$
 - action probabilities:
   ```math
   \pi = \text{softmax}(z)
-  ```
+  $$
 
-### Gradient $\nabla_\theta \log \pi^\theta$
-```math
-\pi^\theta(a\mid s) = \pi =
-\begin{pmatrix}
-\pi_{1} \\
-\pi_2 \\
-\vdots \\
-\pi_{12}
-\end{pmatrix},
-```
-where by $\pi_a$ we denote the probability $\pi^\theta(a\mid s)$ of making action $a \in \mathbb{A}$ in state $s \in \mathbb{S}$.
-```math
-\log(\pi^\theta(a\mid s)) = \log(q_a) = \log\left(\frac{e^{z_a}}{\sum_{j}e^{z_j}}\right) = z_a - \log\left(\sum_{j}e^{z_j}\right)
-```
-```math
-\frac{\partial}{\partial z_i} \log(\pi^\theta(a\mid s)) = 
-\begin{cases}
-1 - \pi_i, & i = a, \\
--\pi_i, & i \neq a.
-\end{cases}
-```
-```math
-\frac{\partial \log \pi_\theta(a\mid s)}{\partial z} = 
-\begin{pmatrix}
-\frac{\partial \log \pi_\theta(a\mid s)}{\partial z_1}\\
-\vdots \\
-\frac{\partial \log \pi_\theta(a\mid s)}{\partial z_{12}}
-\end{pmatrix}
-= e_a - \pi
-```
-where denote by $e_a$ the 12-dimentional one-hot vector corresponding to the action $a \in \mathbb{A}$.
-Then:
-```math
-\frac{\partial \log \pi}{\partial W_2} = h^\top \delta,\qquad
-\frac{\partial \log \pi}{\partial b_2} = \delta
-```
-```math
-g_h = W_2\delta,\qquad
-g_{\text{pre}} = g_h \odot \text{ELU}'(h_{\text{pre}})
-```
-```math
-\frac{\partial \log \pi}{\partial W_1} = x^\top g_{\text{pre}},\qquad
-\frac{\partial \log \pi}{\partial b_1} = g_{\text{pre}}
-```
+### Optimization
+Training uses standard PyTorch autograd with Adam optimizer:
+$$
+\mathcal{L}(\theta) = -\frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
+$$
+where $B=\texttt{--num-envs}$ is the number of episodes collected per update step.
 
 Batch update (average over parallel environments):
 ```math
@@ -362,7 +332,7 @@ uv run python -m rubik_rl.trainer [args]
 Main arguments:
 - `--episodes` (required)
 - `--num-envs` (parallel env count)
-- `--scramble-steps` (maximum scramble depth; per episode sampled uniformly from `1..max`)
+- `--scramble-steps` (initial fixed scramble depth for curriculum)
 - `--max-episode-steps`
 - `--gamma`
 - `--lr`
@@ -370,24 +340,40 @@ Main arguments:
 - `--checkpoint-dir`
 - `--seed`
 - `--log-interval`
-- `--stats-window`
+- `--device` (`cpu`, `cuda`, `mps`)
+- `--tensorboard-logdir` (base directory; each run creates `run_YYYYMMDD_HHMMSS`)
+- `--exp-name` (optional experiment name; if set logs go to `<tensorboard-logdir>/<exp-name>/run_YYYYMMDD_HHMMSS` and name is written to TensorBoard)
+- `--torch-env` / `--no-torch-env` (torch-env backend flag; currently torch-env is the intended training backend)
+
+Training mode:
+- **No servers are started during training.**
+- The trainer runs batched cube logic in `TorchRubikBatchEnv` directly on the selected device for speed.
 
 Important training details:
-- **Scramble sampling rule**: for each episode, scramble depth is sampled as
-  $$
-  s \sim \mathcal{U}\{1,\dots,S_{\max}\},\quad S_{\max}=\texttt{--scramble-steps}
-  $$
-  so `--scramble-steps` is an upper bound, not a fixed depth.
+- **Scramble curriculum**:
+  - each episode uses a **fixed** scramble depth equal to current curriculum level;
+  - starts from `--scramble-steps`;
+  - when batch solve-rate `SR > 0.8`, curriculum increases by `+1`;
+  - maximum curriculum level is `10`.
 - **Batch-size / learning-rate behavior**: gradients are **averaged** across parallel environments, not summed:
   $$
   g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
   \theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
   $$
   therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
+- **Batch-level logging (no windows)**:
+  TensorBoard and console metrics are computed from the **current batch only** (`B = --num-envs` episodes),
+  including:
+  - solve rate (`SR`)
+  - current scramble depth (`scramble_steps_current`)
+  - mean steps
+  - mean steps to solve
+  - mean total return
+  - mean return from each reward component (`step`, `inverse_penalty`, `repeat_penalty`, `timeout_penalty`)
 
 Examples:
 ```bash
-# Fast local parallel training (internal process pool envs)
+# Fast local training (local cube engines, no HTTP)
 uv run python -m rubik_rl.trainer \
   --num-envs 16 \
   --episodes 200000 \
@@ -395,19 +381,12 @@ uv run python -m rubik_rl.trainer \
   --max-episode-steps 40 \
   --gamma 0.95 \
   --lr 1e-4 \
+  --device cuda \
+  --exp-name baseline_scr3 \
+  --tensorboard-logdir runs/cube_reinforcer \
   --save-every 5000 \
   --checkpoint-dir checkpoints \
-  --log-interval 1000 \
-  --stats-window 5000
-
-# Train against already running external server (single env only)
-uv run python -m rubik_rl.trainer \
-  --external-server \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --num-envs 1 \
-  --episodes 50000 \
-  --scramble-steps 4
+  --log-interval 1000
 ```
 
 ---
@@ -441,6 +420,54 @@ or:
 ```bash
 uv run python scripts/infer_policy.py --host 127.0.0.1 --port 8000 --scramble-steps 6
 ```
+
+### 3) Offline Checkpoint Evaluation (no GUI / no HTTP)
+Runs local batched evaluation for scramble depths `1..20`, each with many random episodes.
+
+Default command (full run):
+```bash
+uv run python -m rubik_rl.evaluate_checkpoint \
+  --checkpoint-dir checkpoints \
+  --device cpu \
+  --episodes-per-scramble 100000 \
+  --scramble-min 1 \
+  --scramble-max 20 \
+  --max-episode-steps 100 \
+  --eval-batch-size 4096 \
+  --output-dir eval_reports \
+  --output-prefix checkpoint_eval \
+  --progress on
+```
+
+Wrapper script:
+```bash
+uv run python scripts/evaluate_checkpoint.py --checkpoint-dir checkpoints
+```
+
+Quick smoke run:
+```bash
+uv run python -m rubik_rl.evaluate_checkpoint \
+  --checkpoint-dir checkpoints \
+  --episodes-per-scramble 64 \
+  --scramble-min 1 \
+  --scramble-max 2 \
+  --max-episode-steps 10 \
+  --eval-batch-size 32 \
+  --progress off
+```
+
+Outputs:
+- PNG plots:
+  - `<output-dir>/<output-prefix>_success_rate.png`
+  - `<output-dir>/<output-prefix>_steps_stats.png`
+- Machine-readable metrics:
+  - `<output-dir>/<output-prefix>_metrics.csv`
+  - `<output-dir>/<output-prefix>_metrics.json`
+
+Reported metrics per scramble depth:
+- `success_rate`
+- solved-only steps: `steps_solved_min/mean/max` (N/A if no solved episodes)
+- all-episodes steps: `steps_all_min/mean/max` (unsolved counted as `max_episode_steps`)
 
 ---
 

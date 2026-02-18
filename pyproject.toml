@@ -5,9 +5,13 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "pygame>=2.6.1",
     "pytest>=9.0.2",
+    "setuptools>=82.0.0",
+    "tensorboard>=2.20.0",
+    "torch>=2.10.0",
     "tqdm>=4.67.3",
 ]

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
+import torch
 
 from rubik_rl.checkpoint import CheckpointManager
 from rubik_rl.policy import LinearSoftmaxPolicy
@@ -14,16 +14,14 @@ class TestCheckpoint(unittest.TestCase):
             mgr = CheckpointManager(td)
             p = LinearSoftmaxPolicy(seed=42)
 
-            p.W1 += 0.123
-            p.b1 -= 0.456
-            p.W2 += 0.234
-            p.b2 -= 0.567
+            with torch.no_grad():
+                for param in p.parameters():
+                    param.add_(0.123)
             path1 = mgr.save(p, episode=1000, metadata={"foo": 1})
 
-            p.W1 += 0.2
-            p.b1 += 0.2
-            p.W2 += 0.2
-            p.b2 += 0.2
+            with torch.no_grad():
+                for param in p.parameters():
+                    param.add_(0.2)
             path2 = mgr.save(p, episode=2000, metadata={"foo": 2})
 
             self.assertEqual(Path(path2), mgr.latest_path())
@@ -31,10 +29,8 @@ class TestCheckpoint(unittest.TestCase):
             loaded, episode = mgr.load_latest()
             self.assertIsNotNone(loaded)
             self.assertEqual(episode, 2000)
-            self.assertTrue(np.allclose(loaded.W1, p.W1))
-            self.assertTrue(np.allclose(loaded.b1, p.b1))
-            self.assertTrue(np.allclose(loaded.W2, p.W2))
-            self.assertTrue(np.allclose(loaded.b2, p.b2))
+            for p_ref, p_loaded in zip(p.parameters(), loaded.parameters()):
+                self.assertTrue(torch.allclose(p_ref, p_loaded))
             self.assertTrue(path1.exists())
             self.assertTrue(path2.exists())
 

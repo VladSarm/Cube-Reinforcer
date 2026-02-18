@@ -56,7 +56,7 @@ Since the baseline does not depend on the action:
 
 ```math
 \mathbb{E}\left[
-b \nabla_\theta \log \pi_\theta(a_t \mid s_t)
+b_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)
 \right]
 =
 0,
@@ -77,8 +77,16 @@ mean return across the batch:
 b_t = \frac{1}{N} \sum_{i=1}^{N} R_t^{(i)}.
 ```
 ## Training Results
-
-### Hyperparameters
+During training, we evaluate the cumulative solve rate defined as
+```math
+\text{solve\_rate}_{\text{total}}
+=
+\frac{
+\text{number of solved episodes}
+}{
+\text{total number of episodes}
+}
+```
 
 | Parameter | Value |
 |---|---:|

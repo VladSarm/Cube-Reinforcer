@@ -18,13 +18,13 @@ from .torch_env_sparse import TorchSparseBatchEnv
 
 def _load_sparse_torch_latest(
     checkpoint_dir: str,
-) -> tuple[SparsePolicyTorch | None, torch.optim.Optimizer | None, int]:
-    """Load latest SparsePolicyTorch checkpoint (.pt) from directory. Returns (policy, optimizer_state, episode)."""
+) -> tuple[SparsePolicyTorch | None, torch.optim.Optimizer | None, int, int]:
+    """Load latest SparsePolicyTorch checkpoint. Returns (policy, opt_state, episode, level)."""
     import re
     pattern = re.compile(r"policy_ep(\d+)\.pt$")
     dir_path = Path(checkpoint_dir)
     if not dir_path.is_dir():
-        return None, None, 0
+        return None, None, 0, 1
     best_ep, best_path = -1, None
     for p in dir_path.glob("policy_ep*.pt"):
         m = pattern.search(p.name)
@@ -33,17 +33,18 @@ def _load_sparse_torch_latest(
             if ep > best_ep:
                 best_ep, best_path = ep, p
     if best_path is None:
-        return None, None, 0
+        return None, None, 0, 1
     data = torch.load(best_path, map_location="cpu")
     policy = SparsePolicyTorch.from_state_dict(data["model_state_dict"])
     opt_state = data.get("optimizer_state_dict")
     episode = int(data.get("episode", 0))
-    return policy, opt_state, episode
+    level = int(data.get("metadata", {}).get("curriculum_level", 1))
+    return policy, opt_state, episode, level
 
 
 class ReinforceSparseTrainerTorch:
     CURRICULUM_THRESHOLD = 0.80
-    CURRICULUM_MAX_SCRAMBLE = 10
+    CURRICULUM_MAX_LEVEL = 7  # all 7 corners (a..g)
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -56,11 +57,12 @@ class ReinforceSparseTrainerTorch:
             torch.manual_seed(args.seed)
 
         self.device = self._resolve_device(args.device)
-        self.policy, opt_state, self.start_episode = _load_sparse_torch_latest(args.checkpoint_dir)
+        self.policy, opt_state, self.start_episode, saved_level = _load_sparse_torch_latest(args.checkpoint_dir)
         if self.policy is None:
             hidden_dim = getattr(args, "hidden_dim", None) or SparsePolicyTorch.HIDDEN_DIM
             self.policy = SparsePolicyTorch(hidden_dim=hidden_dim, seed=args.seed)
             self.start_episode = 0
+
         self.policy.to(self.device)
 
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=args.lr)
@@ -84,13 +86,19 @@ class ReinforceSparseTrainerTorch:
             self._rng.manual_seed(args.seed)
 
         self.env = TorchSparseBatchEnv(batch_size=args.num_envs, device=self.device)
-        self.current_scramble_steps = min(int(args.scramble_steps), self.CURRICULUM_MAX_SCRAMBLE)
+
+        # Curriculum: level = number of corners that must be at home to "solve" episode
+        start_level = getattr(args, "start_level", 1)
+        self.current_level: int = max(int(start_level), saved_level)
+        self.env.set_target_n(self.current_level)
+
         self._episode_bar: tqdm | None = None
 
         self._log(
             "trainer_init sparse_torch "
             f"episodes={args.episodes} num_envs={args.num_envs} "
-            f"scramble_steps_start={self.current_scramble_steps} scramble_steps_max={self.CURRICULUM_MAX_SCRAMBLE} "
+            f"scramble_steps={args.scramble_steps} "
+            f"curriculum_level_start={self.current_level} curriculum_level_max={self.CURRICULUM_MAX_LEVEL} "
             f"curriculum_threshold={self.CURRICULUM_THRESHOLD:.2f} max_episode_steps={args.max_episode_steps} "
             f"gamma={args.gamma} lr={args.lr} optimizer=adam "
             f"device={self.device.type} tensorboard_logdir={tb_logdir} "
@@ -99,7 +107,7 @@ class ReinforceSparseTrainerTorch:
         if self.start_episode == 0:
             self._log("checkpoint_status no checkpoint found, initialized random policy")
         else:
-            self._log(f"checkpoint_status resumed from episode={self.start_episode}")
+            self._log(f"checkpoint_status resumed from episode={self.start_episode} level={self.current_level}")
 
     @staticmethod
     def _resolve_device(device_name: str) -> torch.device:
@@ -130,8 +138,7 @@ class ReinforceSparseTrainerTorch:
         gamma = float(self.args.gamma)
 
         self.env.reset(B)
-        scramble_used = int(self.current_scramble_steps)
-        self.env.scramble(scramble_used, generator=self._rng)
+        self.env.scramble(int(self.args.scramble_steps), generator=self._rng)
 
         rewards = torch.zeros((T, B), dtype=torch.float32, device=self.device)
         rewards_repeat = torch.zeros((T, B), dtype=torch.float32, device=self.device)
@@ -186,7 +193,7 @@ class ReinforceSparseTrainerTorch:
             "last_steps": self.env.steps[-1].item(),
             "last_solved": bool(self.env.done[-1].item()),
             "last_return": float(episode_return[-1].item()),
-            "scramble_steps": scramble_used,
+            "curriculum_level": self.current_level,
         }
 
     def _save_checkpoint(self, episode: int) -> None:
@@ -196,9 +203,10 @@ class ReinforceSparseTrainerTorch:
             "lr": self.args.lr,
             "gamma": self.args.gamma,
             "num_envs": self.args.num_envs,
-            "scramble_steps": self.current_scramble_steps,
+            "scramble_steps": self.args.scramble_steps,
+            "curriculum_level": self.current_level,
             "curriculum_threshold": self.CURRICULUM_THRESHOLD,
-            "curriculum_max_scramble": self.CURRICULUM_MAX_SCRAMBLE,
+            "curriculum_max_level": self.CURRICULUM_MAX_LEVEL,
             "device": self.device.type,
             "mode": "sparse_torch",
         }
@@ -257,31 +265,32 @@ class ReinforceSparseTrainerTorch:
                 self.tb_writer.add_scalar("train/return_repeat_penalty_mean_batch", ret_repeat, global_batch)
                 self.tb_writer.add_scalar("train/loss_batch", loss_value, global_batch)
                 self.tb_writer.add_scalar("train/lr", float(self.args.lr), global_batch)
-                self.tb_writer.add_scalar("train/scramble_steps_current", int(metrics["scramble_steps"]), global_batch)
+                self.tb_writer.add_scalar("train/curriculum_level", self.current_level, global_batch)
 
                 if self.args.log_interval > 0 and global_episode % self.args.log_interval == 0:
                     self._log(
                         "batch_stats "
                         f"episode={global_episode} batch={global_batch} "
-                        f"scramble_steps={int(metrics['scramble_steps'])} "
+                        f"level={self.current_level} "
                         f"sr={sr:.3f} steps_mean={steps_mean:.2f} "
                         f"steps_to_solve_mean={steps_to_solve_mean:.2f} "
                         f"return_mean={return_mean:.2f} ret_timeout={ret_timeout:.2f} "
                         f"ret_repeat={ret_repeat:.2f} loss={loss_value:.4f}"
                     )
 
-                if sr > self.CURRICULUM_THRESHOLD and self.current_scramble_steps < self.CURRICULUM_MAX_SCRAMBLE:
-                    prev = self.current_scramble_steps
-                    self.current_scramble_steps += 1
+                if sr > self.CURRICULUM_THRESHOLD and self.current_level < self.CURRICULUM_MAX_LEVEL:
+                    prev = self.current_level
+                    self.current_level += 1
+                    self.env.set_target_n(self.current_level)
                     self._log(
                         f"curriculum_update episode={global_episode} batch={global_batch} "
-                        f"sr={sr:.3f} scramble_steps {prev}->{self.current_scramble_steps}"
+                        f"sr={sr:.3f} level {prev}->{self.current_level}"
                     )
 
                 self._episode_bar.update(batch_size)
                 self._episode_bar.set_postfix(
                     {
-                        "scr": int(metrics["scramble_steps"]),
+                        "lvl": self.current_level,
                         "steps": int(metrics["last_steps"]),
                         "solved": bool(metrics["last_solved"]),
                         "ret": f"{metrics['last_return']:.1f}",
@@ -309,8 +318,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--episodes", type=int, required=True)
     p.add_argument("--max-episode-steps", type=int, default=200)
     p.add_argument(
-        "--scramble-steps", type=int, required=True,
-        help="Initial scramble depth. Curriculum increases by +1 when SR > 0.8, up to 10.",
+        "--scramble-steps", type=int, default=30,
+        help="Fixed scramble depth applied every episode (default 30 = maximally random).",
+    )
+    p.add_argument(
+        "--start-level", type=int, default=1,
+        help="Starting curriculum level (1..7): number of corners that must be solved to end episode.",
     )
     p.add_argument("--gamma", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=3e-4)

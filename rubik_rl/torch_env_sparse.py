@@ -18,6 +18,9 @@ STEP_PENALTY = -0.1
 #   oscillate: a,b,a,b where b == a^1 (infinite back-and-forth)
 REPEAT_PENALTY = 1.0
 
+# Number of observable corners (a..g); H is fixed
+NUM_KEY_SLOTS = 7
+
 
 class TorchSparseBatchEnv:
     """Batched environment using permutation-based state, 6 actions only (H corner fixed).
@@ -25,7 +28,10 @@ class TorchSparseBatchEnv:
     State: perm [B, 24] — identity means solved.
     Observation: [B, 31] = [B, 7] sparse binary state + [B, 24] action history one-hot.
     Actions: 0-5 (mapped to 12-action space via ACTION_6_TO_12).
-    Reward: +10 if solved, -0.1 per step, 0 if already done.
+    Reward: +100 if target_n corners solved, -0.1 per step, 0 if already done.
+
+    Curriculum: set target_n via set_target_n(n). Episode is "solved" when the first
+    target_n corners (a, b, c, ...) are all at their home slots.
     """
 
     ACTION_DIM = 6
@@ -44,13 +50,22 @@ class TorchSparseBatchEnv:
         # Identity = solved
         self.identity = torch.arange(self.STATE_SIZE, dtype=torch.long, device=device)  # [24]
 
-        # KEY_SLOTS tensor for building sparse observation
+        # KEY_SLOTS tensor for building sparse observation (all 7 corners a..g)
         self.key_slots = torch.as_tensor(KEY_SLOTS, dtype=torch.long, device=device)  # [7]
+
+        # Curriculum: how many of the first target_n corners must be at home to "solve"
+        self.target_n: int = NUM_KEY_SLOTS  # default: all 7 (full solve)
 
         self.perm = self.identity.unsqueeze(0).expand(self.batch_size, -1).clone()
         self.action_hist = torch.full((self.batch_size, self.HISTORY_LEN), -1, dtype=torch.long, device=device)
         self.done = torch.zeros(self.batch_size, dtype=torch.bool, device=device)
         self.steps = torch.zeros(self.batch_size, dtype=torch.long, device=device)
+
+    def set_target_n(self, n: int) -> None:
+        """Set curriculum level: episode solved when first n corners (a..g) are at home."""
+        if not (1 <= n <= NUM_KEY_SLOTS):
+            raise ValueError(f"target_n must be in [1, {NUM_KEY_SLOTS}], got {n}")
+        self.target_n = int(n)
 
     def reset(self, batch_size: int | None = None) -> None:
         if batch_size is not None and int(batch_size) != self.batch_size:
@@ -73,8 +88,13 @@ class TorchSparseBatchEnv:
         self.steps = self.steps + active.long()
 
     def _is_solved(self) -> torch.Tensor:
-        """True if perm == identity for each env in batch. Returns [B] bool tensor."""
-        return (self.perm == self.identity.unsqueeze(0)).all(dim=1)
+        """True if the first target_n corners are at their home slots. Returns [B] bool."""
+        slots = self.key_slots[:self.target_n]  # [target_n]
+        key_pieces = torch.gather(
+            self.perm, dim=1,
+            index=slots.unsqueeze(0).expand(self.batch_size, -1),
+        )  # [B, target_n]
+        return (key_pieces == slots.unsqueeze(0)).all(dim=1)  # [B]
 
     def build_observation(self) -> torch.Tensor:
         """Returns [B, 31]: 7-bit sparse state + 24-dim action history one-hot."""
@@ -100,7 +120,7 @@ class TorchSparseBatchEnv:
         return torch.cat([sparse_state, hist_flat], dim=1)  # [B, 31]
 
     def scramble(self, scramble_steps: int, generator: torch.Generator) -> None:
-        """Scramble all envs with up to scramble_steps random 6-actions (no inverse of prev)."""
+        """Scramble all envs with scramble_steps random 6-actions (no inverse of prev)."""
         steps = int(scramble_steps)
         if steps < 1:
             raise ValueError("scramble_steps must be >= 1")
@@ -159,7 +179,7 @@ class TorchSparseBatchEnv:
         solved = self._is_solved()
         self.done = self.done | solved
 
-        # Step reward: +10 solved, -0.1 per active step, 0 if already done
+        # Step reward: +100 solved, -0.1 per active step, 0 if already done
         reward_step = torch.where(
             active & solved,
             torch.full((self.batch_size,), SOLVE_REWARD, dtype=torch.float32, device=self.device),

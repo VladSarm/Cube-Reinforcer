@@ -1,6 +1,6 @@
 # Cube-Reinforcer
 
-`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik's Cube** with a custom simulator and a PyTorch REINFORCE pipeline.
+`Cube-Reinforcer` is a research-style project about solving the **2x2 Rubik’s Cube** with a custom simulator and a NumPy-only REINFORCE pipeline.
 
 The repository combines:
 - a mathematically correct 2x2 cube engine with 12 discrete actions,
@@ -17,7 +17,7 @@ The repository combines:
 5. [Installation](#installation)
 6. [Running Tests](#running-tests)
 7. [Simulator](#simulator)
-8. [Training (REINFORCE, PyTorch)](#training-reinforce-pytorch)
+8. [Training (REINFORCE, NumPy)](#training-reinforce-numpy)
 9. [Evaluation](#evaluation)
 10. [Experiments](#experiments)
 11. [Current Limits and Notes](#current-limits-and-notes)
@@ -29,7 +29,7 @@ The project is focused on RL for a compact but non-trivial combinatorial domain:
 - **Environment**: true 2x2 Rubik cube dynamics.
 - **Action space**: 12 actions (`U/D/L/R/F/B` with `+/-` quarter-turns).
 - **State**: one-hot stickers (`24 x 6`), with additional one-hot history of the last 4 actions.
-- **Policy**: two-layer neural network implemented in PyTorch.
+- **Policy**: two-layer network implemented manually in NumPy.
 - **Algorithm**: REINFORCE with discounted returns (no learned value network).
 
 Main goals:
@@ -104,20 +104,17 @@ uv run python -m rubik_rl.trainer --help
 ---
 
 ## Running Tests
-Run full test suite from the project root:
+Run full test suite:
 ```bash
 cd Cube-Reinforcer
-uv sync
 uv run pytest -q
 ```
-
-If pytest fails with `ModuleNotFoundError: No module named 'yaml'` (e.g. when a system pytest plugin like ROS is loaded), the project now depends on `pyyaml`; run `uv sync` and try again. To avoid loading external plugins, run tests with an isolated env: `uv run pytest -q -p no:launch_testing` or ensure no `PYTHONPATH` points at ROS/system site-packages.
 
 The tests cover:
 - engine move correctness and inverse properties,
 - solved-check logic (including global orientation invariance),
 - API behavior,
-- policy gradient math / autograd sanity checks,
+- policy gradient math (finite-difference check),
 - checkpoint save/load,
 - train/infer smoke integration.
 
@@ -207,15 +204,11 @@ Common options:
 
 Mode options:
 - `--scramble-steps` (default `20`)
-- `--show-index N` (GUI only): draw the sticker at flat state index `N` (0..23) in black, to visually identify that cell.
 
 Examples:
 ```bash
-# GUI + HTTP server (from project root)
+# GUI + HTTP server
 uv run python -m rubik_sim.cli gui --host 127.0.0.1 --port 8000 --scramble-steps 8
-
-# GUI with one sticker highlighted in black (e.g. index 0)
-uv run python -m rubik_sim.cli gui --show-index 0
 
 # Headless server
 uv run python -m rubik_sim.cli headless --host 127.0.0.1 --port 8001 --scramble-steps 8
@@ -248,65 +241,111 @@ uv run python -m rubik_sim.cli gui --state-file ./state.json
 
 ---
 
-## Training (REINFORCE, PyTorch)
+## Training (REINFORCE, NumPy)
 ### Algorithm and Notation
-Notation follows standard REINFORCE lecture style:
-- trajectory: $\tau = (s_0,a_0,r_1,\dots,s_T)$
-- policy: $\pi_\theta(a_t\mid s_t)$
-- discounted return:
-  $$
-  G_t = \sum_{k=0}^{T-t-1}\gamma^k r_{t+k+1}
-  $$
+Notation follows standard REINFORCE lecture style. Random variables are denoted by capital letters, data points by lowercase letters.
+- $\mathbb{S}$ - state space, $s \in \mathbb{S}$ - state  
+$\mathbb{A}$ - action space, $a \in \mathbb{A}$ - action  
+- Environment: $S_{t+1} \sim p(\cdot\mid S_t, A_t)$
+- Policy: $A_t \sim \pi^{\theta}(\cdot\mid S_t)$
+- Reward: $R_t \sim p^{R}(\cdot\mid S_t, A_t)$
+- Trajectory: $z_{0:T} = \{(s_0,a_0), (s_1,a_1), \dots, (s_{T-1},a_{T-1})\}$, where $T$ is the length of the episode
 
-Policy objective:
-$$
-J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_t G_t \log \pi_\theta(a_t\mid s_t)\right]
-$$
+Policy objective (definition):
+```math
+J(\theta) = \mathbb{E}_{\pi^\theta}\left[\sum_{t=0}^{T-1} \gamma^t r(S_t, A_t)\right],
+```
+where $\gamma \in \left[0,1\right]$ is the discount factor.
 
 Gradient estimator:
-$$
-\nabla_\theta J(\theta)\approx \sum_t G_t \nabla_\theta \log \pi_\theta(a_t\mid s_t)
-$$
+```math
+\nabla_\theta J(\theta)
+=
+\mathbb{E}_{\pi^\theta}
+\left[
+\sum_{t=0}^{T-1}
+\gamma^t R_t \nabla_\theta \log \pi^\theta (A_t \mid S_t)
+\right]
+```
+where
+```math
+R_t = \sum_{k=t}^{T-1} \gamma^{k-t} r(S_k, A_k).
+```
 
-### Network Structure
+The idea is to perform gradient ascent
+```math
+\theta \longleftarrow \theta + \alpha \cdot \nabla_\theta J(\theta)
+```
+
+### Network representing policy $\pi^\theta$
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
-  $$
-  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
-  $$
-- first activation:
-  $$
-  h^{(1)} = \text{ELU}(h^{(1)}_{\text{pre}})
-  $$
-- second affine layer:
-  $$
-  h^{(2)}_{\text{pre}} = h^{(1)}W_2 + b_2,\quad W_2\in\mathbb{R}^{512\times 128}
-  $$
-- second activation:
-  $$
-  h^{(2)} = \text{ELU}(h^{(2)}_{\text{pre}})
-  $$
+```math
+  h_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 128}
+```
+- activation:
+  ```math
+  h = \text{ELU}(h_{\text{pre}})
+  ```
 - output affine layer:
-  $$
-  z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
-  $$
+  ```math
+  z = hW_2 + b_2,\quad W_2\in\mathbb{R}^{128\times 12}
+  ```
 - action probabilities:
-  $$
+  ```math
   \pi = \text{softmax}(z)
-  $$
+  ```
 
-### Optimization
-Training uses standard PyTorch autograd with Adam optimizer:
-$$
-\mathcal{L}(\theta) = -\frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
-$$
-where $B=\texttt{--num-envs}$ is the number of episodes collected per update step.
+### Gradient $\nabla_\theta \log \pi^\theta$
+```math
+\pi^\theta(a\mid s) = \pi =
+\begin{pmatrix}
+\pi_{1} \\
+\pi_2 \\
+\vdots \\
+\pi_{12}
+\end{pmatrix},
+```
+where by $\pi_a$ we denote the probability $\pi^\theta(a\mid s)$ of making action $a \in \mathbb{A}$ in state $s \in \mathbb{S}$.
+```math
+\log(\pi^\theta(a\mid s)) = \log(q_a) = \log\left(\frac{e^{z_a}}{\sum_{j}e^{z_j}}\right) = z_a - \log\left(\sum_{j}e^{z_j}\right)
+```
+```math
+\frac{\partial}{\partial z_i} \log(\pi^\theta(a\mid s)) = 
+\begin{cases}
+1 - \pi_i, & i = a, \\
+-\pi_i, & i \neq a.
+\end{cases}
+```
+```math
+\frac{\partial \log \pi_\theta(a\mid s)}{\partial z} = 
+\begin{pmatrix}
+\frac{\partial \log \pi_\theta(a\mid s)}{\partial z_1}\\
+\vdots \\
+\frac{\partial \log \pi_\theta(a\mid s)}{\partial z_{12}}
+\end{pmatrix}
+= e_a - \pi
+```
+where denote by $e_a$ the 12-dimentional one-hot vector corresponding to the action $a \in \mathbb{A}$.
+Then:
+```math
+\frac{\partial \log \pi}{\partial W_2} = h^\top \delta,\qquad
+\frac{\partial \log \pi}{\partial b_2} = \delta
+```
+```math
+g_h = W_2\delta,\qquad
+g_{\text{pre}} = g_h \odot \text{ELU}'(h_{\text{pre}})
+```
+```math
+\frac{\partial \log \pi}{\partial W_1} = x^\top g_{\text{pre}},\qquad
+\frac{\partial \log \pi}{\partial b_1} = g_{\text{pre}}
+```
 
 Batch update (average over parallel environments):
-$$
+```math
 \Delta\theta = \frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\nabla_\theta \log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
-$$
+```
 
 ### Reward Shaping
 Default reward components:
@@ -323,7 +362,7 @@ uv run python -m rubik_rl.trainer [args]
 Main arguments:
 - `--episodes` (required)
 - `--num-envs` (parallel env count)
-- `--scramble-steps` (initial fixed scramble depth for curriculum)
+- `--scramble-steps` (maximum scramble depth; per episode sampled uniformly from `1..max`)
 - `--max-episode-steps`
 - `--gamma`
 - `--lr`
@@ -331,48 +370,24 @@ Main arguments:
 - `--checkpoint-dir`
 - `--seed`
 - `--log-interval`
-- `--device` (`cpu`, `cuda`, `mps`)
-- `--tensorboard-logdir` (base directory; each run creates `run_YYYYMMDD_HHMMSS`)
-- `--exp-name` (optional experiment name; if set logs go to `<tensorboard-logdir>/<exp-name>/run_YYYYMMDD_HHMMSS` and name is written to TensorBoard)
-- `--torch-env` / `--no-torch-env` (torch-env backend flag; currently torch-env is the intended training backend)
-
-Training mode:
-- **No servers are started during training.**
-- The trainer runs batched cube logic in `TorchRubikBatchEnv` directly on the selected device for speed.
+- `--stats-window`
 
 Important training details:
-- **Scramble curriculum**:
-  - each episode uses a **fixed** scramble depth equal to current curriculum level;
-  - starts from `--scramble-steps`;
-  - when batch solve-rate `SR > 0.8`, curriculum increases by `+1`;
-  - maximum curriculum level is `10`.
+- **Scramble sampling rule**: for each episode, scramble depth is sampled as
+  $$
+  s \sim \mathcal{U}\{1,\dots,S_{\max}\},\quad S_{\max}=\texttt{--scramble-steps}
+  $$
+  so `--scramble-steps` is an upper bound, not a fixed depth.
 - **Batch-size / learning-rate behavior**: gradients are **averaged** across parallel environments, not summed:
   $$
   g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
   \theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
   $$
   therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
-- **Batch-level logging (no windows)**:
-  TensorBoard and console metrics are computed from the **current batch only** (`B = --num-envs` episodes),
-  including:
-  - solve rate (`SR`)
-  - current scramble depth (`scramble_steps_current`)
-  - mean steps
-  - mean steps to solve
-  - mean total return
-  - mean return from each reward component (`step`, `inverse_penalty`, `repeat_penalty`, `timeout_penalty`)
 
-### Sparse training (7-bit state, 6 actions, plane reward)
-Separate script: reduced state (cells a..g), 6 actions (angle H fixed), vectorized reward by planes.
+Examples:
 ```bash
-cd Cube-Reinforcer
-uv run python -m rubik_rl.trainer_sparse --episodes 2000 --scramble-steps 4 --max-episode-steps 200 --lr 0.01 --save-every 500 --checkpoint-dir checkpoints_sparse
-```
-Checkpoints go to `checkpoints_sparse/`. In the GUI, use the **Eval Sparse** button (below Scramble) to run the sparse policy; it loads from `checkpoints_sparse/`.
-
-Examples (full trainer):
-```bash
-# Fast local training (local cube engines, no HTTP)
+# Fast local parallel training (internal process pool envs)
 uv run python -m rubik_rl.trainer \
   --num-envs 16 \
   --episodes 200000 \
@@ -380,12 +395,19 @@ uv run python -m rubik_rl.trainer \
   --max-episode-steps 40 \
   --gamma 0.95 \
   --lr 1e-4 \
-  --device cuda \
-  --exp-name baseline_scr3 \
-  --tensorboard-logdir runs/cube_reinforcer \
   --save-every 5000 \
   --checkpoint-dir checkpoints \
-  --log-interval 1000
+  --log-interval 1000 \
+  --stats-window 5000
+
+# Train against already running external server (single env only)
+uv run python -m rubik_rl.trainer \
+  --external-server \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --num-envs 1 \
+  --episodes 50000 \
+  --scramble-steps 4
 ```
 
 ---
@@ -423,26 +445,52 @@ uv run python scripts/infer_policy.py --host 127.0.0.1 --port 8000 --scramble-st
 ---
 
 ## Experiments
-_This section is intentionally prepared as a template._
 
-### 1. Training Curves
-![Experiment: solve rate](docs/images/exp_solve_rate.png)
-![Experiment: average return](docs/images/exp_avg_return.png)
+Evaluation was run on a single trained checkpoint against 100 randomly scrambled episodes per depth, sweeping scramble depths from 1 to 50.
+Two step budgets are compared: **25 steps** and **100 steps** per episode.
 
-### 2. Ablations
-- [ ] Reward shaping ablation
-- [ ] `num-envs` scaling
-- [ ] History length ablation
-- [ ] Scramble curriculum (`--scramble-steps`)
+### Steps-to-Solve
 
-### 3. Qualitative Evaluation
-![Example rollout 1](docs/images/exp_rollout_1.gif)
-![Example rollout 2](docs/images/exp_rollout_2.gif)
+Steps-to-solve statistics are split into two groups:
+- **Solid lines** — statistics computed only over episodes the agent actually solved (`Solved min / mean / max`).
+- **Dashed lines** — statistics computed over all episodes including timeouts (`All min / mean / max`).
 
-### 4. Notes
-- TODO: add exact hyperparameter tables.
-- TODO: attach seed-averaged metrics.
-- TODO: compare against no-normalization baseline.
+**100-step budget**
+
+![Checkpoint Evaluation: Steps-to-solve, 100 steps](docs/Evaluation_100.jpg)
+
+With a 100-step budget the agent reliably solves even deeply scrambled cubes.
+The `Solved mean` rises from ~2 steps at depth 1 to ~23 steps and then plateaus for depths above ~10 — meaning the policy finds a consistent solution path whose length is bounded regardless of how scrambled the initial state is (since the cube state distribution saturates quickly with depth).
+`Solved max` hits the 100-step ceiling starting at depth ~5–6: occasionally the agent needs almost the full budget for harder positions.
+`All mean` tracks slightly above `Solved mean` (~27 steps at plateau) because a small fraction of episodes time out, pulling the average up.
+
+**25-step budget**
+
+![Checkpoint Evaluation: Steps-to-solve, 25 steps](docs/Evaluation_25)
+
+With a 25-step budget the same qualitative shape appears but is compressed.
+`Solved max` hits the 25-step ceiling earlier (depth ~3–4), and `All mean` diverges visibly from `Solved mean` at moderate depths — reflecting the higher timeout rate when the budget is tight.
+
+---
+
+### Success Rate
+
+Success rate is the fraction of episodes (out of 100) the agent solved within the allowed step budget.
+
+**100-step budget**
+
+![Checkpoint Evaluation: Success Rate, 100 steps](docs/SR_100steps.jpg)
+
+With 100 steps the agent achieves near-perfect success rate (~0.99) at low scramble depth and degrades only gently to ~0.95 at depth 50.
+The policy generalises well: 100 steps is a sufficient budget for almost any reachable 2×2 state, and the slight decline at higher depths is due to a small number of positions that require long solution paths.
+
+**25-step budget**
+
+![Checkpoint Evaluation: Success Rate, 25 steps](docs/SR_25_steps.jpg)
+
+With only 25 steps the success rate starts at ~1.0 for shallow scrambles, drops steeply through depths 5–20, and then plateaus at ~0.60–0.65 for depths above ~25.
+The drop reflects the step budget becoming the bottleneck rather than policy quality: the agent knows how to solve the cube but cannot complete the solution within 25 moves for harder scrambles.
+The sawtooth oscillation visible in the plateau region is a parity effect — even and odd scramble depths produce structurally different position distributions (e.g. an even-depth scramble can be undone in an even number of moves), causing alternating slight changes in difficulty.
 
 ---
 

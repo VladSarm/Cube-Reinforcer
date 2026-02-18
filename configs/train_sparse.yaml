@@ -13,7 +13,8 @@ training:
   device: cuda
   num_envs: 4096         # max safe batch on RTX 3070 Ti 8GB (peak ~4.2 GB VRAM with T=200)
   episodes: 5000000
-  scramble_steps: 1      # curriculum starts at 1, grows to 10 when SR > 80%
+  scramble_steps: 30     # fixed — maximally random cube every episode
+  start_level: 1         # curriculum: start with 1 corner, grows to 7 when SR > 80%
   max_episode_steps: 200
   gamma: 1.0
   lr: 3.0e-4
@@ -22,4 +23,4 @@ training:
   tensorboard_logdir: runs/cube_reinforcer_sparse
   seed: null
   log_interval: 1000
-  repeat_penalty: 1.0    # penalty for 3rd consecutive identical action
+  repeat_penalty: 1.0    # penalty for 3rd consecutive identical action or oscillation

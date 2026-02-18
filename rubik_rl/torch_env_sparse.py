@@ -7,12 +7,13 @@ import torch
 
 from rubik_sim.actions import ACTION_6_TO_12, MOVE_PERMUTATIONS
 
-from .sparse_state import KEY_SLOTS
+from .sparse_state import KEY_SLOTS, CURRICULUM_ORDER, TARGET_PIECE, REWARD_SHAPE_MATRIX
 
 # Scalar reward constants
-SOLVE_REWARD = 100.0       # big positive signal for solving
-TIMEOUT_PENALTY = 100.0    # big negative signal for failing the episode
-STEP_PENALTY = -0.1
+SOLVE_REWARD = 100.0       # +100 for reaching curriculum goal
+TIMEOUT_PENALTY = 100.0    # -100 for timeout / not reaching goal (applied in trainer at episode end)
+STEP_PENALTY = -1.0        # -1 per action by default
+# Shaping: corner in target cell +1, corner on one of its 3 faces +0.33 (see REWARD_SHAPE_MATRIX)
 # Penalty for wasteful patterns:
 #   repeat-3: a,a,a  (3rd same action = 270° = wasteful, 2 reps = 180° is OK)
 #   oscillate: a,b,a,b where b == a^1 (infinite back-and-forth)
@@ -28,10 +29,12 @@ class TorchSparseBatchEnv:
     State: perm [B, 24] — identity means solved.
     Observation: [B, 31] = [B, 7] sparse binary state + [B, 24] action history one-hot.
     Actions: 0-5 (mapped to 12-action space via ACTION_6_TO_12).
-    Reward: +100 if target_n corners solved, -0.1 per step, 0 if already done.
+    Reward: -1 per step; +1 per corner in target cell, +0.33 per corner on one of its faces (shaping);
+    +100 if curriculum goal reached, -100 if timeout (applied in trainer).
 
     Curriculum: set target_n via set_target_n(n). Episode is "solved" when the first
-    target_n corners (a, b, c, ...) are all at their home slots.
+    target_n corners in curriculum order (d, f, b, a, c, e, g) are at home: stage 1 = D→d
+    (corner above static H), stage 2 = +F, stage 3 = +B, stages 4–7 = +a,+c,+e,+g.
     """
 
     ACTION_DIM = 6
@@ -53,8 +56,15 @@ class TorchSparseBatchEnv:
         # KEY_SLOTS tensor for building sparse observation (all 7 corners a..g)
         self.key_slots = torch.as_tensor(KEY_SLOTS, dtype=torch.long, device=device)  # [7]
 
-        # Curriculum: how many of the first target_n corners must be at home to "solve"
+        # Curriculum: how many of the first target_n corners (in CURRICULUM_ORDER) must be at home to "solve"
         self.target_n: int = NUM_KEY_SLOTS  # default: all 7 (full solve)
+        self._curriculum_slots = torch.as_tensor(
+            KEY_SLOTS[CURRICULUM_ORDER], dtype=torch.long, device=device
+        )  # [7] slots to check per curriculum level (d, f, b, a, c, e, g)
+        self._reward_shape = torch.as_tensor(
+            REWARD_SHAPE_MATRIX, dtype=torch.float32, device=device
+        )  # [7, 24]: reward per (cell, slot) — 1.0 target, 0.33 on face, 0 else
+        self._target_piece = torch.as_tensor(TARGET_PIECE, dtype=torch.long, device=device)  # [7]
 
         self.perm = self.identity.unsqueeze(0).expand(self.batch_size, -1).clone()
         self.action_hist = torch.full((self.batch_size, self.HISTORY_LEN), -1, dtype=torch.long, device=device)
@@ -62,7 +72,7 @@ class TorchSparseBatchEnv:
         self.steps = torch.zeros(self.batch_size, dtype=torch.long, device=device)
 
     def set_target_n(self, n: int) -> None:
-        """Set curriculum level: episode solved when first n corners (a..g) are at home."""
+        """Set curriculum level: episode solved when first n corners in order (d, f, b, a, c, e, g) are at home."""
         if not (1 <= n <= NUM_KEY_SLOTS):
             raise ValueError(f"target_n must be in [1, {NUM_KEY_SLOTS}], got {n}")
         self.target_n = int(n)
@@ -88,8 +98,8 @@ class TorchSparseBatchEnv:
         self.steps = self.steps + active.long()
 
     def _is_solved(self) -> torch.Tensor:
-        """True if the first target_n corners are at their home slots. Returns [B] bool."""
-        slots = self.key_slots[:self.target_n]  # [target_n]
+        """True if the first target_n corners in curriculum order (d, f, b, a, c, e, g) are at home. Returns [B] bool."""
+        slots = self._curriculum_slots[:self.target_n]  # [target_n]
         key_pieces = torch.gather(
             self.perm, dim=1,
             index=slots.unsqueeze(0).expand(self.batch_size, -1),
@@ -179,16 +189,26 @@ class TorchSparseBatchEnv:
         solved = self._is_solved()
         self.done = self.done | solved
 
-        # Step reward: +100 solved, -0.1 per active step, 0 if already done
-        reward_step = torch.where(
+        # Base: -1 per active step, 0 if already done
+        reward_base = torch.where(
+            active,
+            torch.full((self.batch_size,), STEP_PENALTY, dtype=torch.float32, device=self.device),
+            torch.zeros(self.batch_size, dtype=torch.float32, device=self.device),
+        )
+        # Shaping: for each corner, +1 if piece in target cell, +0.33 if on one of its faces
+        inv_perm = torch.zeros_like(self.perm, device=self.device)
+        inv_perm.scatter_(1, self.perm, torch.arange(self.STATE_SIZE, dtype=torch.long, device=self.device).unsqueeze(0).expand(self.batch_size, -1))
+        reward_shaping = torch.zeros(self.batch_size, dtype=torch.float32, device=self.device)
+        for i in range(7):
+            slots_i = inv_perm[:, self._target_piece[i]]  # [B] slot where piece for cell i is
+            reward_shaping += self._reward_shape[i, slots_i]
+        # Solve bonus: +100 when curriculum goal reached this step
+        reward_solve = torch.where(
             active & solved,
             torch.full((self.batch_size,), SOLVE_REWARD, dtype=torch.float32, device=self.device),
-            torch.where(
-                active,
-                torch.full((self.batch_size,), STEP_PENALTY, dtype=torch.float32, device=self.device),
-                torch.zeros(self.batch_size, dtype=torch.float32, device=self.device),
-            ),
+            torch.zeros(self.batch_size, dtype=torch.float32, device=self.device),
         )
+        reward_step = reward_base + reward_shaping + reward_solve
         # Penalty for wasteful patterns (repeat-3 or oscillate)
         reward_repeat = torch.where(
             bad_pattern,

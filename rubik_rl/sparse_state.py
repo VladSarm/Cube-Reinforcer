@@ -47,6 +47,24 @@ SPARSE_DIM = 7
 # In solved state (identity), slot KEY_SLOTS[i] holds piece TARGET_PIECE[i]: A on a, B on b, ...
 assert KEY_SLOTS.size == SPARSE_DIM and np.array_equal(KEY_SLOTS, TARGET_PIECE)
 
+# Curriculum order: first corner above static H (D→d), then +F, then +B, then the rest (a,c,e,g).
+# Cell indices: 0=a, 1=b, 2=c, 3=d, 4=e, 5=f, 6=g.
+# Stage 1: D in d; 2: +F; 3: +B; 4–7: +a, +c, +e, +g.
+CURRICULUM_ORDER = np.array([3, 5, 1, 0, 2, 4, 6], dtype=np.int32)  # d, f, b, a, c, e, g
+
+# Shaping: per corner, reward when the piece that belongs there is in a slot.
+# reward_shape[i, s] = 1.0 if slot s is target for cell i (piece in place), else 0.33 if s on one of cell i's faces, else 0.
+REWARD_SHAPE_MATRIX = np.zeros((SPARSE_DIM, STATE_SIZE), dtype=np.float32)
+for i in range(SPARSE_DIM):
+    target_slot = KEY_SLOTS[i]
+    planes_i = CELL_PLANES[i]
+    for s in range(STATE_SIZE):
+        if s == target_slot:
+            REWARD_SHAPE_MATRIX[i, s] = 1.0
+        elif any(s in pl for pl in planes_i):
+            REWARD_SHAPE_MATRIX[i, s] = 0.33
+        # else 0
+
 
 def piece_permutation(history: list[int]) -> np.ndarray:
     """Cumulative permutation from 12-action history. perm[slot] = solved-index of piece now at that slot."""

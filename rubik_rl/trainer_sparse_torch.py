@@ -43,7 +43,8 @@ def _load_sparse_torch_latest(
 
 
 class ReinforceSparseTrainerTorch:
-    CURRICULUM_THRESHOLD = 0.80
+    CURRICULUM_THRESHOLD = 0.90
+    CURRICULUM_CONSECUTIVE_BATCHES = 2  # advance level only after this many batches with SR > threshold
     CURRICULUM_MAX_LEVEL = 7  # all 7 corners (a..g)
 
     def __init__(self, args: argparse.Namespace):
@@ -91,15 +92,20 @@ class ReinforceSparseTrainerTorch:
         start_level = getattr(args, "start_level", 1)
         self.current_level: int = max(int(start_level), saved_level)
         self.env.set_target_n(self.current_level)
+        self._curriculum_high_sr_count: int = 0  # consecutive batches with SR > threshold
+
+        # Moving-average baseline for returns (reduces variance)
+        self._return_baseline: float = 0.0
 
         self._episode_bar: tqdm | None = None
 
         self._log(
             "trainer_init sparse_torch "
             f"episodes={args.episodes} num_envs={args.num_envs} "
-            f"scramble_steps={args.scramble_steps} "
+            f"scramble_steps={args.scramble_steps} (capped by level) "
             f"curriculum_level_start={self.current_level} curriculum_level_max={self.CURRICULUM_MAX_LEVEL} "
-            f"curriculum_threshold={self.CURRICULUM_THRESHOLD:.2f} max_episode_steps={args.max_episode_steps} "
+            f"curriculum_threshold={self.CURRICULUM_THRESHOLD:.2f} curriculum_consecutive={self.CURRICULUM_CONSECUTIVE_BATCHES} "
+            f"max_episode_steps={args.max_episode_steps} "
             f"gamma={args.gamma} lr={args.lr} optimizer=adam "
             f"device={self.device.type} tensorboard_logdir={tb_logdir} "
             f"checkpoint_dir={args.checkpoint_dir}"
@@ -138,7 +144,13 @@ class ReinforceSparseTrainerTorch:
         gamma = float(self.args.gamma)
 
         self.env.reset(B)
-        self.env.scramble(int(self.args.scramble_steps), generator=self._rng)
+        # Level-dependent scramble: easier scrambles at early curriculum levels
+        scramble_steps = min(
+            int(self.args.scramble_steps),
+            2 + (self.current_level - 1) * 4,
+        )
+        scramble_steps = max(1, scramble_steps)
+        self.env.scramble(scramble_steps, generator=self._rng)
 
         rewards = torch.zeros((T, B), dtype=torch.float32, device=self.device)
         rewards_repeat = torch.zeros((T, B), dtype=torch.float32, device=self.device)
@@ -174,10 +186,15 @@ class ReinforceSparseTrainerTorch:
             running = rewards[t] + gamma * running
             returns[t] = running
 
+        episode_return = rewards.sum(dim=0)  # [B]
+        batch_mean_return = float(episode_return.mean().item())
+        self._return_baseline = 0.99 * self._return_baseline + 0.01 * batch_mean_return
+        # Advantage = return - baseline (reduces variance)
+        returns = returns - self._return_baseline
+
         valid_count = torch.clamp(active_mask.sum(), min=1.0)
         loss = -((log_probs * returns * active_mask).sum() / valid_count)
 
-        episode_return = rewards.sum(dim=0)  # [B]
         episode_steps = self.env.steps.to(torch.float32)
         solved = self.env.done.to(torch.float32)
         solved_steps = episode_steps[self.env.done]
@@ -194,6 +211,8 @@ class ReinforceSparseTrainerTorch:
             "last_solved": bool(self.env.done[-1].item()),
             "last_return": float(episode_return[-1].item()),
             "curriculum_level": self.current_level,
+            "scramble_steps_used": scramble_steps,
+            "return_baseline": self._return_baseline,
         }
 
     def _save_checkpoint(self, episode: int) -> None:
@@ -243,6 +262,7 @@ class ReinforceSparseTrainerTorch:
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
                 global_batch += 1
@@ -266,6 +286,8 @@ class ReinforceSparseTrainerTorch:
                 self.tb_writer.add_scalar("train/loss_batch", loss_value, global_batch)
                 self.tb_writer.add_scalar("train/lr", float(self.args.lr), global_batch)
                 self.tb_writer.add_scalar("train/curriculum_level", self.current_level, global_batch)
+                self.tb_writer.add_scalar("train/scramble_steps_used", metrics["scramble_steps_used"], global_batch)
+                self.tb_writer.add_scalar("train/return_baseline", metrics["return_baseline"], global_batch)
 
                 if self.args.log_interval > 0 and global_episode % self.args.log_interval == 0:
                     self._log(
@@ -278,10 +300,18 @@ class ReinforceSparseTrainerTorch:
                         f"ret_repeat={ret_repeat:.2f} loss={loss_value:.4f}"
                     )
 
-                if sr > self.CURRICULUM_THRESHOLD and self.current_level < self.CURRICULUM_MAX_LEVEL:
+                if sr > self.CURRICULUM_THRESHOLD:
+                    self._curriculum_high_sr_count += 1
+                else:
+                    self._curriculum_high_sr_count = 0
+                if (
+                    self._curriculum_high_sr_count >= self.CURRICULUM_CONSECUTIVE_BATCHES
+                    and self.current_level < self.CURRICULUM_MAX_LEVEL
+                ):
                     prev = self.current_level
                     self.current_level += 1
                     self.env.set_target_n(self.current_level)
+                    self._curriculum_high_sr_count = 0
                     self._log(
                         f"curriculum_update episode={global_episode} batch={global_batch} "
                         f"sr={sr:.3f} level {prev}->{self.current_level}"

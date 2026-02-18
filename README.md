@@ -243,25 +243,41 @@ uv run python -m rubik_sim.cli gui --state-file ./state.json
 
 ## Training (REINFORCE, PyTorch)
 ### Algorithm and Notation
-Notation follows standard REINFORCE lecture style:
-- trajectory: $\tau = (s_0,a_0,r_1,\dots,s_T)$
-- policy: $\pi_\theta(a_t\mid s_t)$
-- discounted return:
-  $$
-  G_t = \sum_{k=0}^{T-t-1}\gamma^k r_{t+k+1}
-  $$
+Notation follows standard REINFORCE lecture style. Random variables are denoted by capital letters, data points by lowercase letters.
+- $\mathbb{S}$ - state space, $s \in \mathbb{S}$ - state  
+$\mathbb{A}$ - action space, $a \in \mathbb{A}$ - action  
+- Environment: $S_{t+1} \sim p(\cdot\mid S_t, A_t)$
+- Policy: $A_t \sim \pi^{\theta}(\cdot\mid S_t)$
+- Reward: $R_t \sim p^{R}(\cdot\mid S_t, A_t)$
+- Trajectory: $z_{0:T} = \{(s_0,a_0), (s_1,a_1), \dots, (s_{T-1},a_{T-1})\}$, where $T$ is the length of the episode
 
-Policy objective:
-$$
-J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_t G_t \log \pi_\theta(a_t\mid s_t)\right]
-$$
+Policy objective (definition):
+```math
+J(\theta) = \mathbb{E}_{\pi^\theta}\left[\sum_{t=0}^{T-1} \gamma^t r(S_t, A_t)\right],
+```
+where $\gamma \in \left[0,1\right]$ is the discount factor.
 
 Gradient estimator:
-$$
-\nabla_\theta J(\theta)\approx \sum_t G_t \nabla_\theta \log \pi_\theta(a_t\mid s_t)
-$$
+```math
+\nabla_\theta J(\theta)
+=
+\mathbb{E}_{\pi^\theta}
+\left[
+\sum_{t=0}^{T-1}
+\gamma^t R_t \nabla_\theta \log \pi^\theta (A_t \mid S_t)
+\right]
+```
+where
+```math
+R_t = \sum_{k=t}^{T-1} \gamma^{k-t} r(S_k, A_k).
+```
 
-### Network Structure
+The idea is to perform gradient ascent
+```math
+\theta \longleftarrow \theta + \alpha \cdot \nabla_\theta J(\theta)
+```
+
+### Network representing policy $\pi^\theta$
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
@@ -285,7 +301,7 @@ Current policy in code:
   z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
   $$
 - action probabilities:
-  $$
+  ```math
   \pi = \text{softmax}(z)
   $$
 
@@ -297,9 +313,9 @@ $$
 where $B=\texttt{--num-envs}$ is the number of episodes collected per update step.
 
 Batch update (average over parallel environments):
-$$
+```math
 \Delta\theta = \frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\nabla_\theta \log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
-$$
+```
 
 ### Reward Shaping
 Default reward components:

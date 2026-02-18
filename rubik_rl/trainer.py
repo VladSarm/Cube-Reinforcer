@@ -6,6 +6,7 @@ import argparse
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
+from itertools import repeat
 
 import numpy as np
 from tqdm import tqdm
@@ -31,9 +32,7 @@ def _discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
         returns[i] = running
     return returns
 
-
-def _worker_episode_gradients(task: dict) -> dict:
-    """Run one full episode in a separate process and return accumulated gradients."""
+def _compute_returns_for_traj(task: dict) -> dict:
     W1 = task["W1"]
     b1 = task["b1"]
     W2 = task["W2"]
@@ -56,12 +55,23 @@ def _worker_episode_gradients(task: dict) -> dict:
 
     for _ in range(max_episode_steps):
         state_oh = encode_one_hot(env.get_state()).astype(np.float64)
-        hist_oh = policy.history_one_hot(action_history)
+        hist_oh = policy.history_one_hot(action_history) # (48,) (flattened 12*4)
+        
         probs = policy.action_probs(state_oh, hist_oh)
         action = int(rng.choice(12, p=probs))
-        reward = compute_step_reward(action_history, action)
         env.step(action)
+
         solved = env.is_solved()
+        next_state_oh = encode_one_hot(env.get_state()).astype(np.float64)
+        
+        reward = compute_step_reward(
+                            action_history=action_history,
+                            action=action,
+                            state_before_one_hot=state_oh,
+                            state_after_one_hot=next_state_oh,
+                            solved_after=solved,
+                        ) # compute_step_reward(action_history, action) # не зависит от state?
+
         traj.append(
             Transition(
                 state_one_hot=state_oh,
@@ -79,7 +89,76 @@ def _worker_episode_gradients(task: dict) -> dict:
 
     rewards = np.asarray([t.reward for t in traj], dtype=np.float64)
     returns = _discounted_returns(rewards, gamma)
-    advantages = returns
+
+    return returns
+
+def _worker_episode_gradients(task: dict, baseline=None) -> dict:
+    """
+    samples ONE full trajectory (one episode)
+    computes the REINFORCE gradient for that trajectory
+    returns the accumulated gradient
+    """
+    W1 = task["W1"]
+    b1 = task["b1"]
+    W2 = task["W2"]
+    b2 = task["b2"]
+    seed = int(task["seed"])
+    scramble_steps_max = int(task["scramble_steps_max"])
+    max_episode_steps = int(task["max_episode_steps"])
+    gamma = float(task["gamma"])
+    policy = LinearSoftmaxPolicy(W1=W1, b1=b1, W2=W2, b2=b2, seed=seed)
+    rng = np.random.default_rng(seed)
+
+    env = RubikEngine(cube_size=2)
+    env.reset()
+    scramble_steps = _sample_scramble_steps(rng, scramble_steps_max)
+    env.scramble(steps=scramble_steps, seed=seed + 17)
+
+    traj: list[Transition] = []
+    solved = False
+    action_history: list[int] = []
+
+    for _ in range(max_episode_steps):
+        state_oh = encode_one_hot(env.get_state()).astype(np.float64)
+        hist_oh = policy.history_one_hot(action_history) # (48,) (flattened 12*4)
+        
+        probs = policy.action_probs(state_oh, hist_oh)
+        action = int(rng.choice(12, p=probs))
+        env.step(action)
+
+        solved = env.is_solved()
+        next_state_oh = encode_one_hot(env.get_state()).astype(np.float64)
+        
+        reward = compute_step_reward(
+                            action_history=action_history,
+                            action=action,
+                            state_before_one_hot=state_oh,
+                            state_after_one_hot=next_state_oh,
+                            solved_after=solved,
+                        ) # compute_step_reward(action_history, action) # не зависит от state?
+
+        traj.append(
+            Transition(
+                state_one_hot=state_oh,
+                action_history_one_hot=hist_oh.copy(),
+                action=action,
+                reward=reward,
+            )
+        )
+        action_history = (action_history + [action])[-4:]
+        if solved:
+            break
+
+    if (not solved) and len(traj) > 0:
+        traj[-1].reward -= TIMEOUT_PENALTY
+
+    rewards = np.asarray([t.reward for t in traj], dtype=np.float64)
+    returns = _discounted_returns(rewards, gamma)
+    if baseline is not None:
+        T = len(returns)
+        advantages = returns - baseline[:T]
+    else:
+        advantages = returns
 
     dW1_acc = np.zeros_like(policy.W1)
     db1_acc = np.zeros_like(policy.b1)
@@ -156,6 +235,8 @@ class ReinforceTrainer:
         self._log_adv_sum = 0.0
         self._log_v_sum = 0.0
         self._log_count = 0
+
+        self.baseline = args.baseline
 
         self._log(
             "trainer_init "
@@ -251,9 +332,9 @@ class ReinforceTrainer:
         return (global_episode % self.args.log_interval) == 0
 
     def _collect_episode_external(self, client: RubikAPIClient, rng: np.random.Generator) -> tuple[list[Transition], bool, int, float]:
-        client.reset()
+        client.reset() # puts the cube into solved state
         scramble_steps = _sample_scramble_steps(rng, self.args.scramble_steps)
-        client.scramble(steps=scramble_steps)
+        client.scramble(steps=scramble_steps) # applies random moves so the episode starts from a scrambled cube
 
         traj: list[Transition] = []
         solved = False
@@ -264,9 +345,18 @@ class ReinforceTrainer:
             hist_oh = self.policy.history_one_hot(action_history)
             probs = self.policy.action_probs(state_oh, hist_oh)
             action = int(rng.choice(12, p=probs))
+
             out = client.step(action)
             solved = bool(out["solved"])
-            reward = compute_step_reward(action_history, action)
+            next_state_oh = np.asarray(out["state"], dtype=np.float64)
+
+            reward = compute_step_reward(
+                action_history=action_history,
+                action=action,
+                state_before_one_hot=state_oh,
+                state_after_one_hot=next_state_oh,
+                solved_after=solved,
+            )
             traj.append(
                 Transition(
                     state_one_hot=state_oh,
@@ -288,6 +378,7 @@ class ReinforceTrainer:
     def _episode_gradients(self, traj: list[Transition]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         rewards = np.asarray([t.reward for t in traj], dtype=np.float64)
         returns = _discounted_returns(rewards, self.args.gamma)
+        
         advantages = returns
 
         dW1_acc = np.zeros_like(self.policy.W1)
@@ -297,7 +388,7 @@ class ReinforceTrainer:
         adv_values: list[float] = []
         v_values: list[float] = []
 
-        for t, advantage in zip(traj, advantages):
+        for t, advantage in zip(traj, advantages):  # Monte-Carlo episode loop
             advantage = float(advantage)
             adv_values.append(advantage)
             v_values.append(0.0)
@@ -369,6 +460,7 @@ class ReinforceTrainer:
             else:
                 with ProcessPoolExecutor(max_workers=self.args.num_envs) as pool:
                     while episodes_done_local < total_to_run:
+                        #batch size = number of sampled episodes (trajectories) used to estimate the Monte-Carlo gradient
                         batch_size = min(self.args.num_envs, total_to_run - episodes_done_local)
                         tasks = []
                         for _ in range(batch_size):
@@ -384,9 +476,21 @@ class ReinforceTrainer:
                                     "max_episode_steps": self.args.max_episode_steps,
                                     "gamma": self.args.gamma,
                                 }
-                            )
+                            ) # len(tasks)=number of sampled trajectories
 
-                        batch_results = list(pool.map(_worker_episode_gradients, tasks))
+                        # Run _worker_episode_gradients(task) for every task in tasks in parallel processes collect all returned results into a list
+                        if self.baseline:
+                            returns = list(pool.map(_compute_returns_for_traj, tasks)) 
+                            T_max = max(len(R) for R in returns)
+                            R_pad = np.zeros((batch_size, T_max), dtype=np.float64)
+                            for i, R in enumerate(returns):
+                                T = len(R)
+                                R_pad[i, :T] = R
+                            baseline = np.mean(R_pad, axis=0)
+                        else:
+                            baseline = None
+
+                        batch_results = list(pool.map(_worker_episode_gradients, tasks, repeat(baseline))) 
 
                         batch_dW1 = np.zeros_like(self.policy.W1)
                         batch_db1 = np.zeros_like(self.policy.b1)
@@ -471,11 +575,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--log-interval", type=int, default=20)
     p.add_argument("--stats-window", type=int, default=100)
+    p.add_argument("--baseline", action="store_true", help="Use time-step batch baseline")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    print(args.external_server)
+    if args.baseline:
+        print('Baseline approach is used')
     trainer = ReinforceTrainer(args)
     trainer.run()
 

@@ -16,7 +16,7 @@ STATE_SIZE = N_FACES * STICKERS_PER_FACE
 FACE_SPECS = {
     "U": {"normal": (0, 1, 0), "right": (1, 0, 0), "up": (0, 0, -1)},
     "R": {"normal": (1, 0, 0), "right": (0, 0, -1), "up": (0, 1, 0)},
-    "F": {"normal": (0, 0, 1), "right": (1, 0, 0), "up": (0, 1, 0)},
+    "F": {"normal": (0, 0, 1), "right": (1, 0, 0), "up": (0, 1, 0)}, # frontal face
     "D": {"normal": (0, -1, 0), "right": (1, 0, 0), "up": (0, 0, 1)},
     "L": {"normal": (-1, 0, 0), "right": (0, 0, 1), "up": (0, 1, 0)},
     "B": {"normal": (0, 0, -1), "right": (-1, 0, 0), "up": (0, 1, 0)},
@@ -63,7 +63,7 @@ FACE_AXIS_LAYER = {
 
 def solved_state() -> np.ndarray:
     """Return the canonical solved flat state of length 24."""
-    return np.repeat(np.arange(N_FACES, dtype=np.int8), STICKERS_PER_FACE)
+    return np.repeat(np.arange(N_FACES, dtype=np.int8), STICKERS_PER_FACE) #[0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3, 4,4,4,4, 5,5,5,5]
 
 
 def action_name(action: int) -> str:

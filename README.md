@@ -54,13 +54,13 @@ The modified gradient becomes:
 
 Since the baseline does not depend on the action:
 
-$$
+```math
 \mathbb{E}\left[
 b \nabla_\theta \log \pi_\theta(a_t \mid s_t)
 \right]
 =
 0,
-$$
+```
 
 the estimator remains unbiased.
 

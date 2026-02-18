@@ -326,49 +326,49 @@ The sawtooth oscillation visible in the plateau region is a parity effect — ev
 ### 📉 Training Curves
 A logarithmic scale is used for the number of episodes for better readability.
 
-**Success rate vs scramble depth**
+**🎯Success rate vs scramble depth**
 
 ![Experiment: solve rate](eval_reports/plots/sr.png)
 
 We used curriculum learning: when the batch solve rate reaches 80%, training advances to the next stage with more scrambles. The plot shows how success rate evolves with scramble depth over training. At around 30 scrambles the cube state distribution is effectively saturated (fully chaotic), and success rate stabilises.
 
-**Returns per scramble depth**
+**🪃Returns per scramble depth**
 
 ![Experiment: total return](eval_reports/plots/total_return.png)
 
 Mean return per scramble depth. It converges to a single value after approximately 20 scrambles.
 
-**Mean return per batch**
+**🎲Mean return per batch**
 
 ![Experiment: return per batch](eval_reports/plots/return_steps.png)
 
 *Batch* here is the number of parallel environments (envs) per update.
 
-**Returns: timeouts and inverse actions**
+**🎰Returns: timeouts and inverse actions**
 
 ![Experiment: return timeout](eval_reports/plots/return_timeout.png)
 ![Experiment: return inverse](eval_reports/plots/return_inverse.png)
 
 Returns for unfinished episodes (timeouts) and for symmetrical action patterns (e.g. [+1, −1, +1, −1…] — inverse moves).
 
-**Total reward**
+**🥇Total reward**
 
 ![Experiment: total reward](eval_reports/plots/total_reward.png)
 
 Total reward likewise converges to its maximum.
 
-**Steps per episode**
+**🚶‍➡️🚶‍➡️🤦Steps per episode**
 
 ![Experiment: steps to solve](eval_reports/plots/steps_to_solve.png)
 
 Steps per episode to solve the cube. The God's number for 2×2 is 14; our policy typically solves in fewer than 20 steps, so it is close to optimal.
 
 ---
-**GAMMA experiments**
+**🎼 GAMMA experiments**
 
 ![Experiment: success rate vs gamma](eval_reports/plots/gammas_sr.png)
 
 We observed that **$\gamma < 1$** makes training take much longer. In the trainer, returns are computed as discounted sums $G_t = r_t + \gamma G_{t+1}$ (see `rubik_rl/trainer.py`, default `--gamma 1.0`). With $\gamma < 1$, future rewards are downweighted, so the gradient signal for actions that lead to solving many steps later is weaker and credit assignment over the full trajectory is harder. For this finite-horizon task we use **$\gamma = 1$** (undiscounted total reward) so the solve event is fully credited and learning converges faster.
 
-
+## 🕋 🤫 ##
 A **3×3** version is in development: [Cube-Reinforcer 3×3 branch](https://github.com/VladSarm/Cube-Reinforcer/tree/3x3).

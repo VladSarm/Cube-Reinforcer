@@ -105,6 +105,12 @@ During training, we evaluate the cumulative solve rate defined as
   <em>Figure 1: Solve-rate comparison with vs. without baseline (2 scramble steps).</em>
 </p>
 
+<p align="center">
+  <img src="plots/objective_compare.png" width="720"/>
+  <br/>
+  <em>Figure 2: Objective (avg_return_interval) comparison with vs. without baseline (2 scramble steps).</em>
+</p>
+
 ---
 
 ### Training to solve 4 scramble steps
@@ -115,5 +121,13 @@ During training, we evaluate the cumulative solve rate defined as
   <em>Figure 2: Solve-rate comparison with vs. without baseline (4 scramble steps).</em>
 </p>
 
-We can see that baseline improves final performance. As task difficulty increases, variance reduction becomes more important. Therefore, for the 4 scramble task the difference between the solve rate curves is more noticeable than for the 2 scramble task.
+<p align="center">
+  <img src="plots/4_swaps/objective_compare.png" width="720"/>
+  <br/>
+  <em>Figure 3: Objective (avg_return_interval) comparison with vs. without baseline (4 scramble steps).</em>
+</p>
+
+We can see that baseline improves final performance. As task difficulty increases, variance reduction becomes more important. Therefore, for the 4 scramble task the difference between the solve rate curves is more noticeable than for the 2 scramble task. 
+
+The objective curves corresponding to the baseline variant are smoother and have fewer oscillations. This is consistent with the theoretical role of the baseline in reducing gradient variance.
 

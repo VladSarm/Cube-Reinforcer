@@ -499,9 +499,7 @@ _This section is intentionally prepared as a template._
 - [ ] Scramble curriculum (`--scramble-steps`)
 
 ### 3. Qualitative Evaluation
-*Place `exp_rollout.gif` in `docs/images/` to show an example rollout animation.*
-
-![Example rollout](docs/images/exp_rollout.gif)
+![Example rollout](docs/images/doc_2026-02-18_18-50-59.gif)
 
 ### 4. Notes
 - TODO: add exact hyperparameter tables.

@@ -405,6 +405,54 @@ or:
 uv run python scripts/infer_policy.py --host 127.0.0.1 --port 8000 --scramble-steps 6
 ```
 
+### 3) Offline Checkpoint Evaluation (no GUI / no HTTP)
+Runs local batched evaluation for scramble depths `1..20`, each with many random episodes.
+
+Default command (full run):
+```bash
+uv run python -m rubik_rl.evaluate_checkpoint \
+  --checkpoint-dir checkpoints \
+  --device cpu \
+  --episodes-per-scramble 100000 \
+  --scramble-min 1 \
+  --scramble-max 20 \
+  --max-episode-steps 100 \
+  --eval-batch-size 4096 \
+  --output-dir eval_reports \
+  --output-prefix checkpoint_eval \
+  --progress on
+```
+
+Wrapper script:
+```bash
+uv run python scripts/evaluate_checkpoint.py --checkpoint-dir checkpoints
+```
+
+Quick smoke run:
+```bash
+uv run python -m rubik_rl.evaluate_checkpoint \
+  --checkpoint-dir checkpoints \
+  --episodes-per-scramble 64 \
+  --scramble-min 1 \
+  --scramble-max 2 \
+  --max-episode-steps 10 \
+  --eval-batch-size 32 \
+  --progress off
+```
+
+Outputs:
+- PNG plots:
+  - `<output-dir>/<output-prefix>_success_rate.png`
+  - `<output-dir>/<output-prefix>_steps_stats.png`
+- Machine-readable metrics:
+  - `<output-dir>/<output-prefix>_metrics.csv`
+  - `<output-dir>/<output-prefix>_metrics.json`
+
+Reported metrics per scramble depth:
+- `success_rate`
+- solved-only steps: `steps_solved_min/mean/max` (N/A if no solved episodes)
+- all-episodes steps: `steps_all_min/mean/max` (unsolved counted as `max_episode_steps`)
+
 ---
 
 ## Experiments

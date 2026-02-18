@@ -99,7 +99,6 @@ class RubikGUI:
         self.scramble_btn = pygame.Rect(40, 560, 180, 44)
         self.reset_btn = pygame.Rect(240, 560, 180, 44)
         self.eval_btn = pygame.Rect(440, 560, 200, 44)
-        self.eval_anti_repeat_checkbox = pygame.Rect(664, 570, 24, 24)
 
         self.yaw = -0.75
         self.pitch = 0.45
@@ -119,7 +118,6 @@ class RubikGUI:
         self.eval_enabled = False
         self.eval_policy = None
         self.eval_checkpoint_dir = "checkpoints"
-        self.eval_anti_repeat_enabled = False
         self.eval_action_history: list[int] = []
 
     def _apply_camera(self, point: np.ndarray) -> np.ndarray:
@@ -292,15 +290,6 @@ class RubikGUI:
             txt = self.font.render(label, True, TEXT)
             self.screen.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
 
-        pygame.draw.rect(self.screen, BUTTON, self.eval_anti_repeat_checkbox, border_radius=4)
-        pygame.draw.rect(self.screen, BUTTON_BORDER, self.eval_anti_repeat_checkbox, width=2, border_radius=4)
-        if self.eval_anti_repeat_enabled:
-            c = self.eval_anti_repeat_checkbox.center
-            pygame.draw.line(self.screen, TEXT, (c[0] - 6, c[1]), (c[0] - 1, c[1] + 6), 2)
-            pygame.draw.line(self.screen, TEXT, (c[0] - 1, c[1] + 6), (c[0] + 7, c[1] - 6), 2)
-        label = self.small_font.render("Anti-repeat x5", True, TEXT)
-        self.screen.blit(label, (self.eval_anti_repeat_checkbox.right + 10, self.eval_anti_repeat_checkbox.y + 3))
-
     def _draw_hud(self):
         payload = self.engine.state_payload()
         header = self.font.render(
@@ -345,15 +334,6 @@ class RubikGUI:
         self.eval_action_history = []
         print(f"eval_mode enabled (checkpoint episode={episode})")
 
-    @staticmethod
-    def _second_best_action(probs: np.ndarray, best_action: int) -> int:
-        order = np.argsort(probs)
-        for idx in range(len(order) - 1, -1, -1):
-            cand = int(order[idx])
-            if cand != best_action:
-                return cand
-        return int(best_action)
-
     def _eval_tick(self):
         if not self.eval_enabled:
             return
@@ -370,13 +350,8 @@ class RubikGUI:
             return
 
         state_one_hot = encode_one_hot(self.engine.get_state()).astype(np.float64)
-        action, probs = self.eval_policy.sample_action(state_one_hot)
-        if self.eval_anti_repeat_enabled:
-            recent = self.eval_action_history[-4:]
-            if len(recent) == 4 and all(a == action for a in recent):
-                alt = self._second_best_action(probs, action)
-                if alt != action:
-                    action = alt
+        hist_oh = self.eval_policy.history_one_hot(self.eval_action_history)
+        action, _ = self.eval_policy.sample_action(state_one_hot, hist_oh)
         self._start_action_animation(action, duration_ms=self._default_anim_duration_ms)
         self.eval_action_history.append(int(action))
         if len(self.eval_action_history) > 8:
@@ -413,9 +388,6 @@ class RubikGUI:
                             self.eval_action_history = []
                     elif self.eval_btn.collidepoint(event.pos):
                         self._toggle_eval()
-                    elif self.eval_anti_repeat_checkbox.collidepoint(event.pos):
-                        self.eval_anti_repeat_enabled = not self.eval_anti_repeat_enabled
-                        print(f"eval_anti_repeat_x5={'on' if self.eval_anti_repeat_enabled else 'off'}")
                     else:
                         self.dragging = True
                         self.last_mouse = event.pos

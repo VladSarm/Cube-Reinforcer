@@ -194,7 +194,59 @@ z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
 \pi = \text{softmax}(z)
 ```
 
-### ✏️ Optimization
+### ✏️ Gradient $\nabla_\theta \log \pi^\theta$
+Policy as a vector:
+```math
+\pi^\theta(\cdot\mid s) = \pi =
+\begin{pmatrix}
+\pi_{1} \\ \pi_2 \\ \vdots \\ \pi_{12}
+\end{pmatrix},
+```
+where by $\pi_a$ we denote the probability $\pi^\theta(a\mid s)$ of taking action $a \in \mathbb{A}$ in state $s \in \mathbb{S}$.
+
+Log-probability (softmax):
+```math
+\log(\pi^\theta(a\mid s)) = \log(\pi_a) = \log\left(\frac{e^{z_a}}{\sum_{j}e^{z_j}}\right) = z_a - \log\left(\sum_{j}e^{z_j}\right).
+```
+
+Derivative w.r.t. logits:
+```math
+\frac{\partial}{\partial z_i} \log(\pi^\theta(a\mid s)) =
+\begin{cases}
+1 - \pi_i, & i = a, \\
+-\pi_i, & i \neq a.
+\end{cases}
+```
+
+Gradient vector:
+```math
+\frac{\partial \log \pi_\theta(a\mid s)}{\partial z} =
+\begin{pmatrix}
+\frac{\partial \log \pi_\theta(a\mid s)}{\partial z_1} \\ \vdots \\ \frac{\partial \log \pi_\theta(a\mid s)}{\partial z_{12}}
+\end{pmatrix}
+= e_a - \pi,
+```
+where $e_a$ is the 12-dimensional one-hot vector for action $a \in \mathbb{A}$. Set $\delta = e_a - \pi$. Then the gradient w.r.t. the output layer is:
+```math
+\boxed{
+\frac{\partial \log \pi}{\partial W_2} = h^\top \delta,\qquad
+\frac{\partial \log \pi}{\partial b_2} = \delta
+}
+```
+
+By the chain rule, gradients w.r.t. $W_1$ and $b_1$:
+```math
+g_h = W_2\delta,\qquad
+g_{\text{pre}} = g_h \odot \text{ELU}'(h_{\text{pre}}),
+```
+```math
+\boxed{
+\frac{\partial \log \pi}{\partial W_1} = x^\top g_{\text{pre}},\qquad
+\frac{\partial \log \pi}{\partial b_1} = g_{\text{pre}}
+}
+```
+
+### 💪 Optimization
 Training uses standard PyTorch autograd with Adam optimizer:
 
 ```math
@@ -312,5 +364,11 @@ Total reward likewise converges to its maximum.
 Steps per episode to solve the cube. The God's number for 2×2 is 14; our policy typically solves in fewer than 20 steps, so it is close to optimal.
 
 ---
+**GAMMA experiments**
+
+![Experiment: success rate vs gamma](eval_reports/plots/gammas_sr.png)
+
+We observed that **$\gamma < 1$** makes training take much longer. In the trainer, returns are computed as discounted sums $G_t = r_t + \gamma G_{t+1}$ (see `rubik_rl/trainer.py`, default `--gamma 1.0`). With $\gamma < 1$, future rewards are downweighted, so the gradient signal for actions that lead to solving many steps later is weaker and credit assignment over the full trajectory is harder. For this finite-horizon task we use **$\gamma = 1$** (undiscounted total reward) so the solve event is fully credited and learning converges faster.
+
 
 A **3×3** version is in development: [Cube-Reinforcer 3×3 branch](https://github.com/VladSarm/Cube-Reinforcer/tree/3x3).

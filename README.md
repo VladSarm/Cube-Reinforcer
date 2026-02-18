@@ -7,20 +7,18 @@ The repository combines:
 - a GUI + HTTP simulator API for control and visualization,
 - a policy-gradient training stack for RL experiments.
 
+**Installation, commands, and run instructions:** see [RUNME.md](RUNME.md).
+
 ---
 
 ## Table of Contents
 1. [Project Overview](#project-overview)
 2. [Why This Problem Is Hard](#why-this-problem-is-hard)
 3. [2x2 Rubik Cube Facts](#2x2-rubik-cube-facts)
-4. [Repository Structure](#repository-structure)
-5. [Installation](#installation)
-6. [Running Tests](#running-tests)
-7. [Simulator](#simulator)
-8. [Training (REINFORCE, PyTorch)](#training-reinforce-pytorch)
-9. [Evaluation](#evaluation)
-10. [Experiments](#experiments)
-11. [Current Limits and Notes](#current-limits-and-notes)
+4. [Simulator](#simulator)
+5. [Training (REINFORCE, PyTorch)](#training-reinforce-pytorch)
+6. [Experiments](#experiments)
+7. [Current Limits and Notes](#current-limits-and-notes)
 
 ---
 
@@ -61,66 +59,9 @@ From an engineering perspective, complexity comes from:
 
 ---
 
-## Repository Structure
-```text
-Cube-Reinforcer/
-├── rubik_sim/                 # Simulator engine, GUI, HTTP server
-│   ├── actions.py
-│   ├── engine.py
-│   ├── gui.py
-│   ├── server.py
-│   ├── state_codec.py
-│   └── cli.py
-├── rubik_rl/                  # RL components
-│   ├── policy.py
-│   ├── trainer.py
-│   ├── infer.py
-│   ├── checkpoint.py
-│   ├── reward.py
-│   └── client.py
-├── scripts/
-│   ├── train_reinforce.py
-│   └── infer_policy.py
-└── tests/
-```
-
----
-
-## Installation
-The project uses `uv` for environment and dependency management.
-
-1. Install dependencies:
-```bash
-cd Cube-Reinforcer
-uv sync
-```
-
-2. Run modules with project environment:
-```bash
-uv run python -m rubik_sim.cli --help
-uv run python -m rubik_rl.trainer --help
-```
-
----
-
-## Running Tests
-Run full test suite:
-```bash
-cd Cube-Reinforcer
-uv run pytest -q
-```
-
-The tests cover:
-- engine move correctness and inverse properties,
-- solved-check logic (including global orientation invariance),
-- API behavior,
-- policy gradient math / autograd sanity checks,
-- checkpoint save/load,
-- train/infer smoke integration.
-
----
-
 ## Simulator
+![Example rollout](eval_reports/doc_2026-02-18_18-50-59.gif)
+
 ### Purpose
 The simulator provides:
 - exact 2x2 dynamics for RL,
@@ -185,59 +126,6 @@ The simulator provides:
 - `POST /step`
 - `POST /step_animated`
 - `GET /solved`
-
-### Simulator CLI Parameters
-Command:
-```bash
-uv run python -m rubik_sim.cli <mode> [options]
-```
-Modes:
-- `gui`
-- `headless`
-
-Common options:
-- `--host` (default `127.0.0.1`)
-- `--port` (default `8000`)
-- `--cube-size` (default `2`, currently only `2` supported)
-- `--state-json` (JSON string with initial state)
-- `--state-file` (path to JSON file with initial state)
-
-Mode options:
-- `--scramble-steps` (default `20`)
-
-Examples:
-```bash
-# GUI + HTTP server
-uv run python -m rubik_sim.cli gui --host 127.0.0.1 --port 8000 --scramble-steps 8
-
-# Headless server
-uv run python -m rubik_sim.cli headless --host 127.0.0.1 --port 8001 --scramble-steps 8
-
-# Start with explicit state from file
-uv run python -m rubik_sim.cli gui --state-file ./state.json
-```
-
-### System Sketch (ASCII)
-```text
-                    +---------------------+
-                    |   rubik_rl.trainer  |
-                    | (REINFORCE updates) |
-                    +----------+----------+
-                               |
-                               | HTTP (/state, /step, /scramble, /reset)
-                               v
- +--------------------+    +---------------------+    +------------------+
- | rubik_rl.infer.py  +--->| rubik_sim.server.py |--->| rubik_sim.engine |
- | policy checkpoint  |    |  (headless or GUI)  |    |  cube dynamics   |
- +--------------------+    +----------+----------+    +--------+---------+
-                                      |                        |
-                                      | GUI mode               | one-hot state
-                                      v                        v
-                                 +-----------+         +-------------------+
-                                 | rubik_sim |         | rubik_sim.codec   |
-                                 |   .gui    |         | state validation  |
-                                 +-----------+         +-------------------+
-```
 
 ---
 
@@ -336,172 +224,88 @@ Default reward components:
 - 4 identical actions in a row penalty: `-100`,
 - timeout (unsolved at max steps): additional `-100`.
 
-### Training CLI
-```bash
-uv run python -m rubik_rl.trainer [args]
-```
+**Scramble curriculum:** each episode uses a **fixed** scramble depth equal to current curriculum level; starts from the configured initial value; when batch solve-rate `SR > 0.8`, curriculum increases by `+1`; maximum curriculum level is `10`.
 
-Main arguments:
-- `--episodes` (required)
-- `--num-envs` (parallel env count)
-- `--scramble-steps` (initial fixed scramble depth for curriculum)
-- `--max-episode-steps`
-- `--gamma`
-- `--lr`
-- `--save-every`
-- `--checkpoint-dir`
-- `--seed`
-- `--log-interval`
-- `--device` (`cpu`, `cuda`, `mps`)
-- `--tensorboard-logdir` (base directory; each run creates `run_YYYYMMDD_HHMMSS`)
-- `--exp-name` (optional experiment name; if set logs go to `<tensorboard-logdir>/<exp-name>/run_YYYYMMDD_HHMMSS` and name is written to TensorBoard)
-- `--torch-env` / `--no-torch-env` (torch-env backend flag; currently torch-env is the intended training backend)
-
-Training mode:
-- **No servers are started during training.**
-- The trainer runs batched cube logic in `TorchRubikBatchEnv` directly on the selected device for speed.
-
-Important training details:
-- **Scramble curriculum**:
-  - each episode uses a **fixed** scramble depth equal to current curriculum level;
-  - starts from `--scramble-steps`;
-  - when batch solve-rate `SR > 0.8`, curriculum increases by `+1`;
-  - maximum curriculum level is `10`.
-- **Batch-size / learning-rate behavior**: gradients are **averaged** across parallel environments, not summed:
-
+**Batch-size / learning-rate:** gradients are **averaged** across parallel environments, not summed:
 ```math
 g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
 \theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
 ```
-
-  therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
-- **Batch-level logging (no windows)**:
-  TensorBoard and console metrics are computed from the **current batch only** (`B = --num-envs` episodes),
-  including:
-  - solve rate (`SR`)
-  - current scramble depth (`scramble_steps_current`)
-  - mean steps
-  - mean steps to solve
-  - mean total return
-  - mean return from each reward component (`step`, `inverse_penalty`, `repeat_penalty`, `timeout_penalty`)
-
-Examples:
-```bash
-# Fast local training (local cube engines, no HTTP)
-uv run python -m rubik_rl.trainer \
-  --num-envs 16 \
-  --episodes 200000 \
-  --scramble-steps 5 \
-  --max-episode-steps 40 \
-  --gamma 0.95 \
-  --lr 1e-4 \
-  --device cuda \
-  --exp-name baseline_scr3 \
-  --tensorboard-logdir runs/cube_reinforcer \
-  --save-every 5000 \
-  --checkpoint-dir checkpoints \
-  --log-interval 1000
-```
-
----
-
-## Evaluation
-There are two evaluation flows.
-
-### 1) GUI Eval Button
-Run GUI and click `Eval: OFF` -> `Eval: ON`.
-- GUI loads latest checkpoint from `checkpoints/`.
-- It applies actions with animation until solved.
-- Optional checkbox `Anti-repeat x5`: if model proposes the same action 5th time in a row, GUI uses the second-best action by probability.
-
-Start GUI:
-```bash
-uv run python -m rubik_sim.cli gui --host 127.0.0.1 --port 8000
-```
-
-### 2) Inference Script (separate process)
-```bash
-uv run python -m rubik_rl.infer \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --scramble-steps 6 \
-  --max-steps 400 \
-  --step-duration-ms 350 \
-  --checkpoint-dir checkpoints
-```
-
-or:
-```bash
-uv run python scripts/infer_policy.py --host 127.0.0.1 --port 8000 --scramble-steps 6
-```
-
-### 3) Offline Checkpoint Evaluation (no GUI / no HTTP)
-Runs local batched evaluation for scramble depths `1..20`, each with many random episodes.
-
-Default command (full run):
-```bash
-uv run python -m rubik_rl.evaluate_checkpoint \
-  --checkpoint-dir checkpoints \
-  --device cpu \
-  --episodes-per-scramble 100000 \
-  --scramble-min 1 \
-  --scramble-max 20 \
-  --max-episode-steps 100 \
-  --eval-batch-size 4096 \
-  --output-dir eval_reports \
-  --output-prefix checkpoint_eval \
-  --progress on
-```
-
-Wrapper script:
-```bash
-uv run python scripts/evaluate_checkpoint.py --checkpoint-dir checkpoints
-```
-
-Quick smoke run:
-```bash
-uv run python -m rubik_rl.evaluate_checkpoint \
-  --checkpoint-dir checkpoints \
-  --episodes-per-scramble 64 \
-  --scramble-min 1 \
-  --scramble-max 2 \
-  --max-episode-steps 10 \
-  --eval-batch-size 32 \
-  --progress off
-```
-
-Outputs:
-- PNG plots:
-  - `<output-dir>/<output-prefix>_success_rate.png`
-  - `<output-dir>/<output-prefix>_steps_stats.png`
-- Machine-readable metrics:
-  - `<output-dir>/<output-prefix>_metrics.csv`
-  - `<output-dir>/<output-prefix>_metrics.json`
-
-Reported metrics per scramble depth:
-- `success_rate`
-- solved-only steps: `steps_solved_min/mean/max` (N/A if no solved episodes)
-- all-episodes steps: `steps_all_min/mean/max` (unsolved counted as `max_episode_steps`)
+so the update scale is stable when `--num-envs` changes.
 
 ---
 
 ## Experiments
-_This section is intentionally prepared as a template._
+Evaluation was run on a single trained checkpoint against 100 randomly scrambled episodes per depth, sweeping scramble depths from 1 to 50.
+Two step budgets are compared: **25 steps** and **100 steps** per episode.
 
-### 1. Training Curves
-![Experiment: solve rate](docs/images/exp_solve_rate.png)
-![Experiment: average return](docs/images/exp_avg_return.png)
+### Steps-to-Solve
+Steps-to-solve statistics are split into two groups:
+- **Solid lines** — statistics computed only over episodes the agent actually solved (`Solved min / mean / max`).
+- **Dashed lines** — statistics computed over all episodes including timeouts (`All min / mean / max`).
 
-### 2. Ablations
+**100-step budget**
+
+![Checkpoint Evaluation: Steps-to-solve, 100 steps](eval_reports/100_steps_steps_stats.png)
+
+With a 100-step budget the agent reliably solves even deeply scrambled cubes.
+The `Solved mean` rises from ~2 steps at depth 1 to ~23 steps and then plateaus for depths above ~10 — meaning the policy finds a consistent solution path whose length is bounded regardless of how scrambled the initial state is (since the cube state distribution saturates quickly with depth).
+`Solved max` hits the 100-step ceiling starting at depth ~5–6: occasionally the agent needs almost the full budget for harder positions.
+`All mean` tracks slightly above `Solved mean` (~27 steps at plateau) because a small fraction of episodes time out, pulling the average up.
+
+**25-step budget**
+
+![Checkpoint Evaluation: Steps-to-solve, 25 steps](eval_reports/25_steps_steps_stats.png)
+
+With a 25-step budget the same qualitative shape appears but is compressed.
+`Solved max` hits the 25-step ceiling earlier (depth ~3–4), and `All mean` diverges visibly from `Solved mean` at moderate depths — reflecting the higher timeout rate when the budget is tight.
+
+### Success Rate
+Success rate is the fraction of episodes (out of 100) the agent solved within the allowed step budget.
+
+**100-step budget**
+
+![Checkpoint Evaluation: Success Rate, 100 steps](eval_reports/100_steps_success_rate.png)
+
+With 100 steps the agent achieves near-perfect success rate (~0.99) at low scramble depth and degrades only gently to ~0.95 at depth 50.
+The policy generalises well: 100 steps is a sufficient budget for almost any reachable 2×2 state, and the slight decline at higher depths is due to a small number of positions that require long solution paths.
+
+**25-step budget**
+
+![Checkpoint Evaluation: Success Rate, 25 steps](eval_reports/25_steps_success_rate.png)
+
+With only 25 steps the success rate starts at ~1.0 for shallow scrambles, drops steeply through depths 5–20, and then plateaus at ~0.60–0.65 for depths above ~25.
+The drop reflects the step budget becoming the bottleneck rather than policy quality: the agent knows how to solve the cube but cannot complete the solution within 25 moves for harder scrambles.
+The sawtooth oscillation visible in the plateau region is a parity effect — even and odd scramble depths produce structurally different position distributions (e.g. an even-depth scramble can be undone in an even number of moves), causing alternating slight changes in difficulty.
+
+### Training Curves
+A logarithmic scale is used for the number of episodes for better readability.
+
+**Success rate vs scramble depth**
+
+![Experiment: solve rate](eval_reports/plots/sr.png)
+
+We used curriculum learning: when the batch solve rate reaches 80%, training advances to the next stage with more scrambles. The plot shows how success rate evolves with scramble depth over training. At around 30 scrambles the cube state distribution is effectively saturated (fully chaotic), and success rate stabilises.
+
+**Total return per scramble depth**
+
+![Experiment: total return](eval_reports/plots/total_return.png)
+
+Mean return per scramble depth. It converges to a single value after approximately 20 scrambles.
+
+**Total reward**
+
+![Experiment: total reward](eval_reports/plots/total_reward.png)
+
+Total reward likewise converges to its maximum. *Batch* here is the number of parallel environments (envs) per update.
+
+### Ablations
 - [ ] Reward shaping ablation
 - [ ] `num-envs` scaling
 - [ ] History length ablation
 - [ ] Scramble curriculum (`--scramble-steps`)
 
-### 3. Qualitative Evaluation
-![Example rollout](eval_reports/doc_2026-02-18_18-50-59.gif)
-
-### 4. Notes
+### Notes
 - TODO: add exact hyperparameter tables.
 - TODO: attach seed-averaged metrics.
 - TODO: compare against no-normalization baseline.

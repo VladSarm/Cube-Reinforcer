@@ -280,29 +280,40 @@ The idea is to perform gradient ascent
 Current policy in code:
 - input $x\in\mathbb{R}^{192}$,
 - first affine layer:
-  $$
-  h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
-  $$
+
+```math
+h^{(1)}_{\text{pre}} = xW_1 + b_1,\quad W_1\in\mathbb{R}^{192\times 512}
+```
+
 - first activation:
-  $$
-  h^{(1)} = \text{ELU}(h^{(1)}_{\text{pre}})
-  $$
+
+```math
+h^{(1)} = \text{ELU}(h^{(1)}_{\text{pre}})
+```
+
 - second affine layer:
-  $$
-  h^{(2)}_{\text{pre}} = h^{(1)}W_2 + b_2,\quad W_2\in\mathbb{R}^{512\times 128}
-  $$
+
+```math
+h^{(2)}_{\text{pre}} = h^{(1)}W_2 + b_2,\quad W_2\in\mathbb{R}^{512\times 128}
+```
+
 - second activation:
-  $$
-  h^{(2)} = \text{ELU}(h^{(2)}_{\text{pre}})
-  $$
+
+```math
+h^{(2)} = \text{ELU}(h^{(2)}_{\text{pre}})
+```
+
 - output affine layer:
-  $$
-  z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
-  $$
+
+```math
+z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
+```
+
 - action probabilities:
-  $$
-  \pi = \text{softmax}(z)
-  $$
+
+```math
+\pi = \text{softmax}(z)
+```
 
 ### Optimization
 Training uses standard PyTorch autograd with Adam optimizer:
@@ -355,10 +366,12 @@ Important training details:
   - when batch solve-rate `SR > 0.8`, curriculum increases by `+1`;
   - maximum curriculum level is `10`.
 - **Batch-size / learning-rate behavior**: gradients are **averaged** across parallel environments, not summed:
-  $$
-  g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
-  \theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
-  $$
+
+```math
+g_{\text{batch}}=\frac{1}{B}\sum_{i=1}^{B} g_i,\qquad
+\theta \leftarrow \theta + \text{lr}\cdot g_{\text{batch}}
+```
+
   therefore the update scale is stable when `--num-envs` changes (you do not need to manually divide `lr` by batch size).
 - **Batch-level logging (no windows)**:
   TensorBoard and console metrics are computed from the **current batch only** (`B = --num-envs` episodes),

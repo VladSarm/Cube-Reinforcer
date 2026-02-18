@@ -244,8 +244,7 @@ uv run python -m rubik_sim.cli gui --state-file ./state.json
 ## Training (REINFORCE, PyTorch)
 ### Algorithm and Notation
 Notation follows standard REINFORCE lecture style. Random variables are denoted by capital letters, data points by lowercase letters.
-- $\mathbb{S}$ - state space, $s \in \mathbb{S}$ - state  
-$\mathbb{A}$ - action space, $a \in \mathbb{A}$ - action  
+- $\mathbb{S}$ — state space, $s \in \mathbb{S}$ — state; $\mathbb{A}$ — action space, $a \in \mathbb{A}$ — action.
 - Environment: $S_{t+1} \sim p(\cdot\mid S_t, A_t)$
 - Policy: $A_t \sim \pi^{\theta}(\cdot\mid S_t)$
 - Reward: $R_t \sim p^{R}(\cdot\mid S_t, A_t)$
@@ -301,7 +300,7 @@ Current policy in code:
   z = h^{(2)}W_3 + b_3,\quad W_3\in\mathbb{R}^{128\times 12}
   $$
 - action probabilities:
-  ```math
+  $$
   \pi = \text{softmax}(z)
   $$
 
@@ -485,8 +484,9 @@ _This section is intentionally prepared as a template._
 - [ ] Scramble curriculum (`--scramble-steps`)
 
 ### 3. Qualitative Evaluation
-![Example rollout 1](docs/images/exp_rollout_1.gif)
-![Example rollout 2](docs/images/exp_rollout_2.gif)
+*Place `exp_rollout.gif` in `docs/images/` to show an example rollout animation.*
+
+![Example rollout](docs/images/exp_rollout.gif)
 
 ### 4. Notes
 - TODO: add exact hyperparameter tables.

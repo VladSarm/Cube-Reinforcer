@@ -253,7 +253,7 @@ Training uses standard PyTorch autograd with Adam optimizer:
 \mathcal{L}(\theta) = -\frac{1}{B}\sum_{i=1}^{B}\sum_t G_t^{(i)}\log \pi_\theta(a_t^{(i)}\mid s_t^{(i)})
 ```
 
-where \(B = \texttt{--num-envs}\) is the number of episodes collected per update step.
+where **B** is the value of `--num-envs` (number of episodes per update step).
 
 Batch update (average over parallel environments):
 ```math
